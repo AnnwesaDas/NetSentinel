@@ -42,7 +42,9 @@ Requires CMake 3.20+, a C++17 compiler, and libpcap headers/library.
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/netsentinel
+./build/netsentinel -l               # list capture devices
+sudo ./build/netsentinel -i en0      # live capture (see bpf note below)
+./build/netsentinel -r sample.pcap   # offline replay from a pcap file
 ```
 
 - **macOS**: libpcap ships with the OS; headers come from the Xcode Command
@@ -83,8 +85,8 @@ cmake -S . -B build -DNETSENTINEL_ENABLE_METAL=ON
 Tracking against the phased build plan in `docs/PLAN.md`.
 
 - [x] Phase 0 — Setup & scaffolding
-- [ ] Phase 1 — Packet capture + parsing
-- [ ] Phase 2 — Thread pool + queue
+- [x] Phase 1 — Packet capture + parsing
+- [x] Phase 2 — Thread pool + queue
 - [ ] Phase 3 — CPU-only anomaly detection (checkpoint)
 - [ ] Phase 4 — Metal GPU kernel port
 - [ ] Phase 5 — Benchmark

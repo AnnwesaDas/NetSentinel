@@ -41,7 +41,14 @@ if(NETSENTINEL_ENABLE_METAL)
 endif()
 
 # --- executable ----------------------------------------------------------------
-add_executable(netsentinel src/main.cpp)
+add_executable(netsentinel
+  src/main.cpp
+  src/capture/capture.cpp
+  src/capture/parser.cpp
+  src/capture/packet.cpp
+  src/queue/packet_queue.cpp
+  src/queue/worker_pool.cpp
+)
 target_link_libraries(netsentinel PRIVATE pcap::pcap Threads::Threads)
 target_include_directories(netsentinel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(netsentinel PRIVATE -Wall -Wextra)
