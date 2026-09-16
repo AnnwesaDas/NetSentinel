@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "netsentinel/headers.hpp"
+
 namespace netsentinel {
 
 std::string mac_to_string(const uint8_t mac[6]) {
@@ -34,12 +36,12 @@ std::string transport_to_string(Transport t) {
 
 std::string tcp_flags_to_string(uint8_t flags) {
     std::string s;
-    if (flags & 0x02) s += "S";  // SYN
-    if (flags & 0x10) s += "A";  // ACK
-    if (flags & 0x01) s += "F";  // FIN
-    if (flags & 0x04) s += "R";  // RST
-    if (flags & 0x08) s += "P";  // PSH
-    if (flags & 0x20) s += "U";  // URG
+    if (flags & kTcpFlagSyn) s += "S";
+    if (flags & kTcpFlagAck) s += "A";
+    if (flags & kTcpFlagFin) s += "F";
+    if (flags & kTcpFlagRst) s += "R";
+    if (flags & kTcpFlagPsh) s += "P";
+    if (flags & kTcpFlagUrg) s += "U";
     return s.empty() ? "-" : s;
 }
 

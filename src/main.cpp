@@ -1,8 +1,13 @@
-// Phase 2: capture thread -> bounded thread-safe queue -> worker thread
-// pool consuming batches. Analysis is still just printing (Phase 3 swaps
-// this callback for real anomaly rules); this phase is about the
-// concurrency plumbing around it.
+// Phase 3: CPU-only anomaly detection on top of the Phase 2 capture ->
+// queue -> worker pool pipeline. Each worker runs AnalysisEngine::analyze
+// per packet (entropy, signature match, port scan, SYN flood); alerts are
+// printed as they fire. Per-packet tracing is now opt-in via -v, since a
+// real scan/flood test generates far too many packets to read live
+// otherwise.
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +16,8 @@
 #include <mutex>
 #include <thread>
 
+#include "netsentinel/alert.hpp"
+#include "netsentinel/analysis_engine.hpp"
 #include "netsentinel/capture.hpp"
 #include "netsentinel/packet.hpp"
 #include "netsentinel/packet_queue.hpp"
@@ -20,6 +27,7 @@ namespace {
 
 netsentinel::Capture* g_capture_for_signal = nullptr;
 std::mutex g_stdout_mutex;
+std::atomic<uint64_t> g_alert_count{0};
 
 void handle_sigint(int) {
     if (g_capture_for_signal != nullptr) {
@@ -37,11 +45,9 @@ void print_packet(const netsentinel::QueuedPacket& q) {
     const auto& pkt = q.meta;
 
     std::lock_guard<std::mutex> lock(g_stdout_mutex);
-    std::printf("[tid=%zx] [%ld.%06ld] len=%u cap=%u  %s -> %s",
-                std::hash<std::thread::id>{}(std::this_thread::get_id()),
-                static_cast<long>(pkt.timestamp.tv_sec), static_cast<long>(pkt.timestamp.tv_usec),
-                pkt.wire_length, pkt.capture_length, mac_to_string(pkt.src_mac).c_str(),
-                mac_to_string(pkt.dst_mac).c_str());
+    std::printf("[%ld.%06ld] len=%u cap=%u  %s -> %s", static_cast<long>(pkt.timestamp.tv_sec),
+                static_cast<long>(pkt.timestamp.tv_usec), pkt.wire_length, pkt.capture_length,
+                mac_to_string(pkt.src_mac).c_str(), mac_to_string(pkt.dst_mac).c_str());
 
     if (!pkt.has_ip) {
         std::printf("  (non-IPv4)\n");
@@ -64,6 +70,28 @@ void print_packet(const netsentinel::QueuedPacket& q) {
     std::printf(" payload=%zuB\n", q.payload_size());
 }
 
+void print_alert(const netsentinel::Alert& alert) {
+    std::lock_guard<std::mutex> lock(g_stdout_mutex);
+    std::printf("%s\n", netsentinel::format_alert(alert).c_str());
+    g_alert_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Parses a non-negative integer option value. Returns false (leaving
+// `out` untouched) on anything that isn't a clean, in-range number —
+// std::atoi would silently turn "-1" into a huge size_t and "abc" into 0.
+bool parse_nonnegative(const char* text, const char* flag, long long max_value, long long& out) {
+    errno = 0;
+    char* end = nullptr;
+    const long long value = std::strtoll(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE || value < 0 || value > max_value) {
+        std::fprintf(stderr, "invalid value for %s: '%s' (expected 0..%lld)\n", flag, text,
+                      max_value);
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 void print_usage(const char* argv0) {
     std::fprintf(stderr,
                   "Usage: %s -i <device> | -r <file.pcap> [options]\n"
@@ -73,7 +101,9 @@ void print_usage(const char* argv0) {
                   "  -l            list available capture devices and exit\n"
                   "  -w <n>        worker thread count (default: hardware concurrency)\n"
                   "  -q <n>        bounded queue capacity (default: 4096)\n"
-                  "  -b <n>        max packets a worker pops per batch (default: 64)\n",
+                  "  -b <n>        max packets a worker pops per batch (default: 64)\n"
+                  "  -v            print every packet, not just alerts\n"
+                  "  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)\n",
                   argv0);
 }
 
@@ -84,25 +114,43 @@ int main(int argc, char** argv) {
     std::string pcap_file;
     int max_packets = 0;
     bool list_only = false;
+    bool verbose = false;
     size_t num_workers = std::max(1u, std::thread::hardware_concurrency());
     size_t queue_capacity = 4096;
     size_t batch_size = 64;
+    double entropy_threshold = 7.0;
 
     for (int i = 1; i < argc; ++i) {
+        long long value = 0;
         if (std::strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
             device = argv[++i];
         } else if (std::strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             pcap_file = argv[++i];
         } else if (std::strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
-            max_packets = std::atoi(argv[++i]);
+            if (!parse_nonnegative(argv[++i], "-c", INT32_MAX, value)) return EXIT_FAILURE;
+            max_packets = static_cast<int>(value);
         } else if (std::strcmp(argv[i], "-l") == 0) {
             list_only = true;
         } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
-            num_workers = static_cast<size_t>(std::atoi(argv[++i]));
+            if (!parse_nonnegative(argv[++i], "-w", 1024, value)) return EXIT_FAILURE;
+            num_workers = static_cast<size_t>(value);
         } else if (std::strcmp(argv[i], "-q") == 0 && i + 1 < argc) {
-            queue_capacity = static_cast<size_t>(std::atoi(argv[++i]));
+            if (!parse_nonnegative(argv[++i], "-q", 1 << 24, value)) return EXIT_FAILURE;
+            queue_capacity = static_cast<size_t>(value);
         } else if (std::strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
-            batch_size = static_cast<size_t>(std::atoi(argv[++i]));
+            if (!parse_nonnegative(argv[++i], "-b", 1 << 20, value)) return EXIT_FAILURE;
+            batch_size = static_cast<size_t>(value);
+        } else if (std::strcmp(argv[i], "-v") == 0) {
+            verbose = true;
+        } else if (std::strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const char* text = argv[++i];
+            entropy_threshold = std::strtod(text, &end);
+            if (end == text || *end != '\0' || entropy_threshold < 0.0 ||
+                entropy_threshold > 8.0) {
+                std::fprintf(stderr, "invalid value for -e: '%s' (expected 0.0..8.0)\n", text);
+                return EXIT_FAILURE;
+            }
         } else {
             print_usage(argv[0]);
             return EXIT_FAILURE;
@@ -149,8 +197,20 @@ int main(int argc, char** argv) {
     g_capture_for_signal = &capture;
     std::signal(SIGINT, handle_sigint);
 
+    netsentinel::AnalysisConfig analysis_config;
+    analysis_config.entropy_threshold = entropy_threshold;
+    netsentinel::AnalysisEngine engine(print_alert, analysis_config);
+
     netsentinel::PacketQueue queue(queue_capacity);
-    netsentinel::WorkerPool pool(num_workers, queue, print_packet, batch_size);
+    netsentinel::WorkerPool pool(
+        num_workers, queue,
+        [&](const netsentinel::QueuedPacket& pkt) {
+            if (verbose) {
+                print_packet(pkt);
+            }
+            engine.analyze(pkt);
+        },
+        batch_size);
     pool.start();
 
     std::printf("capturing from %s ... (%zu worker(s), queue capacity %zu, batch size %zu)\n",
@@ -172,8 +232,9 @@ int main(int argc, char** argv) {
     queue.shutdown();
     pool.join();
 
-    std::printf("done — %d packet(s) captured, %llu processed\n", delivered,
-                static_cast<unsigned long long>(pool.processed_count()));
+    std::printf("done — %d packet(s) captured, %llu processed, %llu alert(s)\n", delivered,
+                static_cast<unsigned long long>(pool.processed_count()),
+                static_cast<unsigned long long>(g_alert_count.load()));
 
     return EXIT_SUCCESS;
 }

@@ -42,6 +42,13 @@ constexpr uint8_t IPPROTO_ICMP_ = 1;
 constexpr uint8_t IPPROTO_TCP_ = 6;
 constexpr uint8_t IPPROTO_UDP_ = 17;
 
+constexpr uint8_t kTcpFlagFin = 0x01;
+constexpr uint8_t kTcpFlagSyn = 0x02;
+constexpr uint8_t kTcpFlagRst = 0x04;
+constexpr uint8_t kTcpFlagPsh = 0x08;
+constexpr uint8_t kTcpFlagAck = 0x10;
+constexpr uint8_t kTcpFlagUrg = 0x20;
+
 // TCP fixed header, 20 bytes (options follow if data_offset() > 5).
 struct TCPHeader {
     uint16_t src_port;  // network byte order
@@ -57,12 +64,12 @@ struct TCPHeader {
     [[nodiscard]] uint8_t data_offset_words() const { return data_offset_reserved >> 4; }
     [[nodiscard]] size_t header_bytes() const { return static_cast<size_t>(data_offset_words()) * 4; }
 
-    [[nodiscard]] bool fin() const { return flags & 0x01; }
-    [[nodiscard]] bool syn() const { return flags & 0x02; }
-    [[nodiscard]] bool rst() const { return flags & 0x04; }
-    [[nodiscard]] bool psh() const { return flags & 0x08; }
-    [[nodiscard]] bool ack() const { return flags & 0x10; }
-    [[nodiscard]] bool urg() const { return flags & 0x20; }
+    [[nodiscard]] bool fin() const { return flags & kTcpFlagFin; }
+    [[nodiscard]] bool syn() const { return flags & kTcpFlagSyn; }
+    [[nodiscard]] bool rst() const { return flags & kTcpFlagRst; }
+    [[nodiscard]] bool psh() const { return flags & kTcpFlagPsh; }
+    [[nodiscard]] bool ack() const { return flags & kTcpFlagAck; }
+    [[nodiscard]] bool urg() const { return flags & kTcpFlagUrg; }
 };
 
 struct UDPHeader {

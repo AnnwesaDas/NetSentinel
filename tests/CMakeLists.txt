@@ -1,0 +1,7 @@
+foreach(test_name parser analysis flow_tracker queue)
+  add_executable(test_${test_name} test_${test_name}.cpp)
+  target_link_libraries(test_${test_name} PRIVATE netsentinel_core)
+  target_include_directories(test_${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(test_${test_name} PRIVATE -Wall -Wextra)
+  add_test(NAME ${test_name} COMMAND test_${test_name})
+endforeach()

@@ -40,15 +40,31 @@ if(NETSENTINEL_ENABLE_METAL)
   # Placeholder for now — Phase 4 wires this up for real.
 endif()
 
-# --- executable ----------------------------------------------------------------
-add_executable(netsentinel
-  src/main.cpp
+# --- core library (everything except main(), so tests can link it) -----------
+add_library(netsentinel_core
   src/capture/capture.cpp
   src/capture/parser.cpp
   src/capture/packet.cpp
   src/queue/packet_queue.cpp
   src/queue/worker_pool.cpp
+  src/analysis/entropy.cpp
+  src/analysis/signature_db.cpp
+  src/analysis/alert.cpp
+  src/analysis/flow_tracker.cpp
+  src/analysis/analysis_engine.cpp
 )
-target_link_libraries(netsentinel PRIVATE pcap::pcap Threads::Threads)
-target_include_directories(netsentinel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(netsentinel_core PUBLIC pcap::pcap Threads::Threads)
+target_include_directories(netsentinel_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(netsentinel_core PRIVATE -Wall -Wextra)
+
+# --- executable ----------------------------------------------------------------
+add_executable(netsentinel src/main.cpp)
+target_link_libraries(netsentinel PRIVATE netsentinel_core)
 target_compile_options(netsentinel PRIVATE -Wall -Wextra)
+
+# --- tests --------------------------------------------------------------------
+option(NETSENTINEL_BUILD_TESTS "Build the unit tests" ON)
+if(NETSENTINEL_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
