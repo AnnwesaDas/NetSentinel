@@ -1,5 +1,6 @@
 // EntropyBackend that runs the payload_entropy Metal kernel: one GPU
-// dispatch per worker batch. Metal builds only.
+// dispatch per worker batch, started by start() and collected by wait(),
+// with GPU buffers pooled across dispatches. Metal builds only.
 #pragma once
 
 #include <string>
@@ -18,8 +19,7 @@ public:
     [[nodiscard]] bool ok() const { return ok_; }
     [[nodiscard]] std::string error() const { return ctx_.last_error(); }
 
-    bool compute(const std::vector<const QueuedPacket*>& packets,
-                 std::vector<double>& entropies) override;
+    std::unique_ptr<PendingEntropy> start(const std::vector<const QueuedPacket*>& packets) override;
     [[nodiscard]] std::string name() const override;
 
 private:

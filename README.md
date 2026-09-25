@@ -34,8 +34,13 @@ on both a CPU path and a Metal GPU path, and benchmarks the two.
 
 Each worker runs `AnalysisEngine::analyze()` per packet:
 
-- **Port scan** — flags a source IP once it has touched N distinct
-  destination ports within a trailing window (default: 10 ports / 5s).
+- **Port scan** — flags a source IP once it has sent connection attempts
+  to N distinct destination ports within a trailing window (default: 10
+  ports / 5s). A connection attempt is a TCP SYN without ACK, or a UDP
+  datagram not sent from a well-known port (below 1024). Counting every
+  packet instead flagged busy servers, whose replies go to hundreds of
+  client ports: about 1,100 false alerts on the benchmark capture, now 0,
+  with every real scan still caught.
 - **SYN flood** — flags a source IP once it has N SYN packets with no
   completing ACK yet, within a trailing window (default: 20 / 2s). A
   legitimate client's own later ACK on the same 4-tuple clears its pending
@@ -111,16 +116,19 @@ Deliberate, understood trade-offs rather than oversights:
   mutex-protected — only the alert cadence is loose. On the stress capture,
   all 20 scanning hosts are flagged at every batch size and worker count;
   only the number of repeat alerts changes.
-- **Busy servers look like port scanners.** The rule counts every packet's
-  destination port, so a server replying to hundreds of clients (each on
-  its own ephemeral port) trips it: about 1,100 false alerts on the
-  benchmark capture. Counting only connection attempts (TCP SYN without
-  ACK) is the usual fix.
+- **UDP scans from a service port go unnoticed.** UDP has no handshake, so
+  datagrams sent from a port below 1024 are treated as server replies and
+  not counted toward the port-scan rule. A scanner that sends from such a
+  port (e.g. `nmap --source-port 53`) evades the UDP half of the rule.
 - **Encrypted traffic trips the entropy rule.** TLS payloads are
   indistinguishable from random bytes, so on real traffic the high-entropy
-  alert fires on most full-size encrypted packets (about 188k of 500k on the
-  benchmark capture). Entropy alone can't tell legitimate TLS from exfil;
-  it needs context such as expected ports or protocol checks.
+  alert fires on most full-size encrypted packets. On the benchmark capture
+  that's about 188k of 500k packets. In a 71-second live capture of normal
+  browsing on the M5, it was 373 of 1,227 packets, and every one was
+  ordinary encrypted traffic (HTTPS on 443, DNS over TLS on 853, XMPP on
+  5222). Entropy alone can't tell legitimate TLS from exfil; it needs
+  context, such as flagging high entropy only on ports that normally carry
+  plaintext.
 
 ## Non-goals (v1)
 
@@ -207,7 +215,9 @@ device/queue/pipeline/buffer path on its own, before any detection logic
 runs on the GPU. Verified on an Apple M5: builds clean, reports `PASS`.
 
 In a Metal build, `-g` moves entropy onto the GPU: each worker sends its
-whole batch (`-b`, default 64 packets) in one dispatch. Everything else
+whole batch (`-b`, default 64 packets; `-L` sets how many microseconds it
+waits to fill one) in one dispatch, and runs the other rules while the GPU
+works. Everything else
 (signatures, port scan, SYN flood) stays on the CPU. The summary line
 reports packets/sec. That figure is only meaningful when replaying a file
 with `-r`; in live capture it includes the time spent waiting for traffic.
@@ -216,6 +226,11 @@ with `-r`; in live capture it includes the time spent waiting for traffic.
 ./build/netsentinel -r sample.pcap        # entropy on CPU
 ./build/netsentinel -r sample.pcap -g     # entropy on GPU
 ```
+
+The GPU pays off only with larger batches: on an Apple M5 with `-b 1024`
+or more, `-g` is 1.23–1.58× faster end to end than CPU-only, and the
+best GPU setting beats the best CPU one by 1.25×. At the default `-b 64`
+the CPU is usually faster. Full results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Project status
 

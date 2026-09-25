@@ -160,6 +160,55 @@ void test_sources_are_tracked_independently() {
     CHECK_EQ_SIZE(alerts, 0u);
 }
 
+void test_busy_server_replies_are_not_a_scan() {
+    // A web server answering 200 clients sends to 200 different ephemeral
+    // ports. Replies (ACK, PSH-ACK) and handshake answers (SYN-ACK) are not
+    // connection attempts, so none of this may count as scanning.
+    FlowTrackerConfig cfg;
+    cfg.port_scan_distinct_port_threshold = 10;
+    FlowTracker tracker(cfg);
+
+    size_t alerts = 0;
+    for (int i = 0; i < 200; ++i) {
+        const uint16_t client_port = static_cast<uint16_t>(40000 + i);
+        const uint8_t flags = (i % 3 == 0)   ? (kTcpFlagSyn | kTcpFlagAck)
+                              : (i % 3 == 1) ? kTcpFlagAck
+                                             : (kTcpFlagPsh | kTcpFlagAck);
+        auto reply = make_test_packet("172.16.0.1", "10.1.0.5", 443, client_port, flags, 1000 + i);
+        alerts += count_of(tracker.observe(reply), AnomalyType::kPortScan);
+    }
+    CHECK_EQ_SIZE(alerts, 0u);
+}
+
+void test_dns_server_replies_are_not_a_scan() {
+    FlowTrackerConfig cfg;
+    cfg.port_scan_distinct_port_threshold = 10;
+    FlowTracker tracker(cfg);
+
+    size_t alerts = 0;
+    for (int i = 0; i < 200; ++i) {
+        auto reply = make_test_packet("8.8.8.8", "10.1.0.5", 53, static_cast<uint16_t>(50000 + i),
+                                      0, 1000 + i, Transport::kUDP);
+        alerts += count_of(tracker.observe(reply), AnomalyType::kPortScan);
+    }
+    CHECK_EQ_SIZE(alerts, 0u);
+}
+
+void test_udp_scan_is_still_detected() {
+    // UDP probes from an ephemeral port to many destination ports.
+    FlowTrackerConfig cfg;
+    cfg.port_scan_distinct_port_threshold = 10;
+    FlowTracker tracker(cfg);
+
+    size_t alerts = 0;
+    for (int i = 0; i < 20; ++i) {
+        auto probe = make_test_packet("10.66.0.9", "10.0.0.1", 51000, static_cast<uint16_t>(100 + i),
+                                      0, 1000 + i * 10, Transport::kUDP);
+        alerts += count_of(tracker.observe(probe), AnomalyType::kPortScan);
+    }
+    CHECK_EQ_SIZE(alerts, 1u);
+}
+
 void test_non_ip_packets_are_ignored() {
     FlowTracker tracker;
     QueuedPacket pkt;  // has_ip defaults to false
@@ -224,6 +273,9 @@ int main() {
     test_stale_syns_expire_from_the_window();
     test_alerts_are_debounced();
     test_sources_are_tracked_independently();
+    test_busy_server_replies_are_not_a_scan();
+    test_dns_server_replies_are_not_a_scan();
+    test_udp_scan_is_still_detected();
     test_non_ip_packets_are_ignored();
     test_state_is_bounded_under_unique_source_flood();
     test_idle_sources_are_forgotten();

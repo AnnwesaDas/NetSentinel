@@ -59,24 +59,51 @@ std::vector<QueuedPacket> mixed_batch() {
 
 // Reports every payload as maximally random, so any packet that reaches the
 // backend alerts. Proves the engine uses the backend it was given.
+class FixedResult : public PendingEntropy {
+public:
+    FixedResult(std::vector<double> values, bool ok) : values_(std::move(values)), ok_(ok) {}
+    bool wait(std::vector<double>& entropies) override {
+        entropies = values_;
+        return ok_;
+    }
+
+private:
+    std::vector<double> values_;
+    bool ok_;
+};
+
 class AlwaysRandomBackend : public EntropyBackend {
 public:
-    bool compute(const std::vector<const QueuedPacket*>& packets,
-                 std::vector<double>& entropies) override {
+    std::unique_ptr<PendingEntropy> start(const std::vector<const QueuedPacket*>& packets) override {
         seen += packets.size();
-        entropies.assign(packets.size(), 8.0);
-        return true;
+        return std::make_unique<FixedResult>(std::vector<double>(packets.size(), 8.0), true);
     }
     std::string name() const override { return "always-random"; }
     size_t seen = 0;
 };
 
+// The ways a real (GPU) backend can fail, each of which must fall back to
+// the CPU rather than drop entropy alerts or read past its results.
+enum class Failure { kCannotStart, kWaitFails, kWrongResultCount };
+
 class FailingBackend : public EntropyBackend {
 public:
-    bool compute(const std::vector<const QueuedPacket*>&, std::vector<double>&) override {
-        return false;
+    explicit FailingBackend(Failure how) : how_(how) {}
+    std::unique_ptr<PendingEntropy> start(const std::vector<const QueuedPacket*>& packets) override {
+        switch (how_) {
+            case Failure::kCannotStart:
+                return nullptr;
+            case Failure::kWaitFails:
+                return std::make_unique<FixedResult>(std::vector<double>(packets.size(), 8.0), false);
+            case Failure::kWrongResultCount:
+                return std::make_unique<FixedResult>(std::vector<double>(1, 8.0), true);
+        }
+        return nullptr;
     }
     std::string name() const override { return "failing"; }
+
+private:
+    Failure how_;
 };
 
 void test_cpu_batch_raises_expected_alerts() {
@@ -111,13 +138,15 @@ void test_engine_uses_the_given_backend() {
 }
 
 void test_failed_backend_falls_back_to_cpu() {
-    Collected c;
-    AnalysisEngine engine(c.sink(), {}, std::make_unique<FailingBackend>());
-    engine.analyze_batch(mixed_batch());
-    // Same alerts as the CPU path: detection must not silently stop.
-    CHECK_EQ_SIZE(c.count(AnomalyType::kHighEntropyPayload), 1u);
-    CHECK_EQ_SIZE(c.count(AnomalyType::kSignatureMatch), 1u);
-    CHECK(engine.backend_fallbacks() == 1);
+    for (Failure how : {Failure::kCannotStart, Failure::kWaitFails, Failure::kWrongResultCount}) {
+        Collected c;
+        AnalysisEngine engine(c.sink(), {}, std::make_unique<FailingBackend>(how));
+        engine.analyze_batch(mixed_batch());
+        // Same alerts as the CPU path: detection must not silently stop.
+        CHECK_EQ_SIZE(c.count(AnomalyType::kHighEntropyPayload), 1u);
+        CHECK_EQ_SIZE(c.count(AnomalyType::kSignatureMatch), 1u);
+        CHECK(engine.backend_fallbacks() == 1);
+    }
 }
 
 void test_batch_without_entropy_candidates_skips_backend() {

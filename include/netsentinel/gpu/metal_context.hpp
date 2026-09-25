@@ -28,6 +28,37 @@ struct PayloadBatch {
     [[nodiscard]] size_t size() const { return offsets.size(); }
 };
 
+// A read-only view of one payload's bytes.
+struct ByteSpan {
+    const uint8_t* data;
+    size_t size;
+};
+
+class MetalContext;
+
+// A payload_entropy dispatch the GPU may still be running, from
+// MetalContext::submit_payload_entropy. Must not outlive its context.
+// Destroying it without calling wait() still waits for the GPU (its buffers
+// go back to a pool for reuse, and the GPU may still be writing to them).
+class PendingGpuEntropy {
+public:
+    ~PendingGpuEntropy();
+    PendingGpuEntropy(const PendingGpuEntropy&) = delete;
+    PendingGpuEntropy& operator=(const PendingGpuEntropy&) = delete;
+
+    // Blocks until the GPU finishes, then puts one entropy (bits per byte)
+    // per payload into `entropies`. Returns false if the dispatch failed.
+    bool wait(std::vector<float>& entropies);
+
+private:
+    friend class MetalContext;
+    struct State;
+    PendingGpuEntropy(MetalContext& context, std::unique_ptr<State> state);
+
+    MetalContext& context_;
+    std::unique_ptr<State> state_;
+};
+
 class MetalContext {
 public:
     MetalContext();
@@ -54,11 +85,20 @@ public:
     // Needs "vector_add" loaded. result[i] = a[i] + b[i].
     bool run_vector_add(const float* a, const float* b, float* result, size_t count);
 
-    // Needs "payload_entropy" loaded. Writes one Shannon entropy (bits per
-    // byte) per payload into `entropies`, resized to batch.size().
+    // Needs "payload_entropy" loaded. Copies the payloads into GPU-visible
+    // memory, starts the kernel and returns without waiting for it, so the
+    // caller can keep working while the GPU runs. The GPU buffers come from
+    // a pool and are reused across calls rather than allocated per dispatch.
+    // The payloads only need to stay alive for the duration of this call.
+    // Returns null on failure (see last_error()).
+    std::unique_ptr<PendingGpuEntropy> submit_payload_entropy(const std::vector<ByteSpan>& payloads);
+
+    // submit_payload_entropy() then wait(), for payloads packed in a
+    // PayloadBatch. Writes one entropy per payload into `entropies`.
     bool run_payload_entropy(const PayloadBatch& batch, std::vector<float>& entropies);
 
 private:
+    friend class PendingGpuEntropy;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

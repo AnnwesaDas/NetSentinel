@@ -119,6 +119,14 @@ target_compile_options(netsentinel PRIVATE -Wall -Wextra)
 add_executable(bench_entropy src/bench/bench_entropy.cpp)
 target_link_libraries(bench_entropy PRIVATE netsentinel_core)
 target_compile_options(bench_entropy PRIVATE -Wall -Wextra)
+# Capture thread on its own: read, decode, copy, queue (see docs/BENCHMARK.md).
+add_executable(bench_capture src/bench/bench_capture.cpp)
+target_link_libraries(bench_capture PRIVATE netsentinel_core)
+target_compile_options(bench_capture PRIVATE -Wall -Wextra)
+# Worker side on its own: each rule, and how it scales with threads.
+add_executable(bench_analysis src/bench/bench_analysis.cpp)
+target_link_libraries(bench_analysis PRIVATE netsentinel_core)
+target_compile_options(bench_analysis PRIVATE -Wall -Wextra)
 
 if(TARGET netsentinel_gpu)
   foreach(exe netsentinel bench_entropy)

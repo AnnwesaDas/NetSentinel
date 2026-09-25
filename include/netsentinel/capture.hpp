@@ -47,6 +47,7 @@ public:
 
 private:
     pcap_t* handle_ = nullptr;
+    bool live_ = false;  // a network interface, not a file
 };
 
 // Lists available capture device names (populated names only), for

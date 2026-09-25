@@ -243,6 +243,27 @@ void test_consumers_get_full_batches_under_load() {
 
 }  // namespace
 
+void test_wait_times_are_counted() {
+    // A push into a full queue that waits ~30 ms for a consumer, and a pop
+    // that waits ~20 ms for packets, should both show up in the counters.
+    PacketQueue queue(1);
+    CHECK(queue.push(packet_with_id(0)));
+    CHECK(queue.push_wait_seconds() == 0.0);  // didn't have to wait
+    std::thread consumer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        queue.pop_batch(1, std::chrono::milliseconds(100));
+    });
+    CHECK(queue.push(packet_with_id(1)));  // blocks until the consumer pops
+    consumer.join();
+    CHECK(queue.push_wait_seconds() >= 0.020);
+
+    queue.pop_batch(1, std::chrono::milliseconds(100));  // drain
+    const double popped_before = queue.pop_wait_seconds();
+    auto empty = queue.pop_batch(1, std::chrono::milliseconds(20));
+    CHECK(empty.empty());
+    CHECK(queue.pop_wait_seconds() - popped_before >= 0.015);
+}
+
 int main() {
     test_batch_pop_preserves_fifo_order();
     test_pop_batch_is_capped_by_max_n();
@@ -256,5 +277,6 @@ int main() {
     test_linger_returns_early_once_batch_is_full();
     test_shutdown_interrupts_linger();
     test_consumers_get_full_batches_under_load();
+    test_wait_times_are_counted();
     return report("queue");
 }

@@ -74,6 +74,24 @@ std::vector<std::vector<uint8_t>> build_payloads() {
     return payloads;
 }
 
+std::vector<gpu::ByteSpan> spans(const std::vector<std::vector<uint8_t>>& payloads, size_t begin,
+                                 size_t end) {
+    std::vector<gpu::ByteSpan> out;
+    for (size_t i = begin; i < end; ++i) out.push_back({payloads[i].data(), payloads[i].size()});
+    return out;
+}
+
+// Each payload's result is computed by its own threadgroup, the same way
+// in every dispatch, so it must match bit for bit whatever else is batched
+// with it.
+bool matches(const std::vector<float>& results, const std::vector<float>& expected, size_t first) {
+    if (first + results.size() > expected.size()) return false;
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (results[i] != expected[first + i]) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -163,6 +181,46 @@ int main() {
             CHECK(ok[t]);
             CHECK(results[t] == gpu_entropy);
         }
+    }
+
+    // Submitting without waiting: two dispatches in flight from one thread,
+    // collected in reverse order.
+    {
+        const size_t half = payloads.size() / 2;
+        auto first = ctx.submit_payload_entropy(spans(payloads, 0, half));
+        auto second = ctx.submit_payload_entropy(spans(payloads, half, payloads.size()));
+        CHECK(first != nullptr && second != nullptr);
+        if (first != nullptr && second != nullptr) {
+            std::vector<float> r1, r2;
+            CHECK(second->wait(r2));
+            CHECK(first->wait(r1));
+            CHECK_EQ_SIZE(r1.size(), half);
+            CHECK_EQ_SIZE(r2.size(), payloads.size() - half);
+            CHECK(matches(r1, gpu_entropy, 0));
+            CHECK(matches(r2, gpu_entropy, half));
+        }
+    }
+
+    // Pooled buffers get reused across batch sizes: small, large (grow),
+    // small again, then large again.
+    for (size_t n : {size_t{3}, payloads.size(), size_t{10}, payloads.size()}) {
+        auto pending = ctx.submit_payload_entropy(spans(payloads, 0, n));
+        std::vector<float> results;
+        CHECK(pending != nullptr && pending->wait(results));
+        CHECK_EQ_SIZE(results.size(), n);
+        CHECK(matches(results, gpu_entropy, 0));
+    }
+
+    // A dispatch dropped without waiting must not corrupt the next one that
+    // reuses its buffers.
+    {
+        auto abandoned = ctx.submit_payload_entropy(spans(payloads, 0, payloads.size()));
+        CHECK(abandoned != nullptr);
+    }
+    {
+        std::vector<float> results;
+        CHECK(ctx.run_payload_entropy(batch, results));
+        CHECK(results == gpu_entropy);
     }
 
     // The backend the pipeline actually uses, against the CPU backend.

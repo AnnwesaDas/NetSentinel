@@ -114,6 +114,7 @@ void print_usage(const char* argv0) {
                   "  -w <n>        worker thread count (default: cores - 1)\n"
                   "  -q <n>        bounded queue capacity (default: 4096)\n"
                   "  -b <n>        max packets a worker pops per batch (default: 64)\n"
+                  "  -L <usec>     how long a worker waits to fill a batch (default: 2000)\n"
                   "  -v            print every packet, not just alerts\n"
                   "  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)\n"
                   "  -g            compute entropy on the Metal GPU (Metal builds only)\n"
@@ -136,6 +137,7 @@ int main(int argc, char** argv) {
     size_t num_workers = cores > 1 ? cores - 1 : 1;
     size_t queue_capacity = 4096;
     size_t batch_size = 64;
+    long long linger_us = 2000;
     double entropy_threshold = 7.0;
 
     for (int i = 1; i < argc; ++i) {
@@ -158,6 +160,8 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             if (!parse_nonnegative(argv[++i], "-b", 1 << 20, value)) return EXIT_FAILURE;
             batch_size = static_cast<size_t>(value);
+        } else if (std::strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            if (!parse_nonnegative(argv[++i], "-L", 1000000, linger_us)) return EXIT_FAILURE;
         } else if (std::strcmp(argv[i], "-v") == 0) {
             verbose = true;
         } else if (std::strcmp(argv[i], "-g") == 0) {
@@ -251,7 +255,7 @@ int main(int argc, char** argv) {
             }
             engine.analyze_batch(batch);
         },
-        batch_size);
+        batch_size, std::chrono::milliseconds(100), std::chrono::microseconds(linger_us));
 
     std::printf("capturing from %s ... (%zu worker(s), queue capacity %zu, batch size %zu, "
                 "entropy on %s)\n",
@@ -262,13 +266,18 @@ int main(int argc, char** argv) {
     pool.start();
 
     int delivered = 0;
+    double capture_seconds = 0;
     {
         std::thread capture_thread([&] {
+            const auto capture_started = std::chrono::steady_clock::now();
             delivered = capture.run(
                 [&](const netsentinel::ParsedPacket& parsed) {
                     queue.push(netsentinel::make_queued_packet(parsed));
                 },
                 max_packets);
+            capture_seconds = std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - capture_started)
+                                  .count();
         });
         capture_thread.join();
     }
@@ -296,6 +305,15 @@ int main(int argc, char** argv) {
     std::printf("alerts by type: port_scan=%llu syn_flood=%llu high_entropy=%llu signature=%llu\n",
                 by_type(AnomalyType::kPortScan), by_type(AnomalyType::kSynFlood),
                 by_type(AnomalyType::kHighEntropyPayload), by_type(AnomalyType::kSignatureMatch));
+    // Which side of the queue waits on the other. A capture thread that is
+    // often blocked on a full queue means the workers are the bottleneck;
+    // workers that are often waiting for packets mean the capture thread is.
+    const double worker_seconds = seconds * static_cast<double>(num_workers);
+    std::printf("waiting: capture thread blocked on a full queue %.0f%% of its %.3fs, "
+                "workers waiting for packets %.0f%% of their time\n",
+                capture_seconds > 0 ? 100.0 * queue.push_wait_seconds() / capture_seconds : 0.0,
+                capture_seconds,
+                worker_seconds > 0 ? 100.0 * queue.pop_wait_seconds() / worker_seconds : 0.0);
     if (engine.backend_fallbacks() > 0) {
         std::printf("warning: %llu batch(es) fell back to CPU entropy after a %s failure\n",
                     static_cast<unsigned long long>(engine.backend_fallbacks()),

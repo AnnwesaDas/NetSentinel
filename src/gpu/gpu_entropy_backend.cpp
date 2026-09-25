@@ -4,26 +4,44 @@
 
 namespace netsentinel::gpu {
 
+namespace {
+class GpuPending : public PendingEntropy {
+public:
+    explicit GpuPending(std::unique_ptr<PendingGpuEntropy> pending) : pending_(std::move(pending)) {}
+    bool wait(std::vector<double>& entropies) override {
+        std::vector<float> results;
+        if (!pending_->wait(results)) {
+            return false;
+        }
+        entropies.assign(results.begin(), results.end());
+        return true;
+    }
+
+private:
+    std::unique_ptr<PendingGpuEntropy> pending_;
+};
+}  // namespace
+
 GpuEntropyBackend::GpuEntropyBackend()
     : ok_(ctx_.is_available() && ctx_.load_kernel(kPayloadEntropyShaderSource, "payload_entropy")) {}
 
 std::string GpuEntropyBackend::name() const { return "gpu (" + ctx_.device_name() + ")"; }
 
-bool GpuEntropyBackend::compute(const std::vector<const QueuedPacket*>& packets,
-                                std::vector<double>& entropies) {
+std::unique_ptr<PendingEntropy> GpuEntropyBackend::start(
+    const std::vector<const QueuedPacket*>& packets) {
     if (!ok_) {
-        return false;
+        return nullptr;
     }
-    PayloadBatch batch;
+    std::vector<ByteSpan> payloads;
+    payloads.reserve(packets.size());
     for (const QueuedPacket* packet : packets) {
-        batch.add(packet->payload_data(), packet->payload_size());
+        payloads.push_back({packet->payload_data(), packet->payload_size()});
     }
-    std::vector<float> results;
-    if (!ctx_.run_payload_entropy(batch, results)) {
-        return false;
+    auto pending = ctx_.submit_payload_entropy(payloads);
+    if (pending == nullptr) {
+        return nullptr;
     }
-    entropies.assign(results.begin(), results.end());
-    return true;
+    return std::make_unique<GpuPending>(std::move(pending));
 }
 
 }  // namespace netsentinel::gpu

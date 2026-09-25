@@ -1,7 +1,8 @@
 // Wires the detection rules together. Entropy is computed per batch through
-// an EntropyBackend (CPU, or GPU in Metal builds); signature matching and
-// the stateful port-scan / SYN-flood rules then run per packet. Safe to call
-// concurrently from every worker thread.
+// an EntropyBackend (CPU, or GPU in Metal builds) while signature matching
+// and the stateful port-scan / SYN-flood rules run per packet, so within a
+// batch, entropy alerts come out after the others. Safe to call concurrently
+// from every worker thread.
 #pragma once
 
 #include <atomic>

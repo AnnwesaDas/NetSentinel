@@ -9,6 +9,7 @@
 //     a time, so Phase 4's Metal port only changes the analysis step.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -68,6 +69,15 @@ public:
 
     [[nodiscard]] size_t size() const;
 
+    // Total time push() callers spent blocked because the queue was full,
+    // and pop_batch() callers spent waiting for packets (including the lock
+    // and any linger). Together they show which side of the queue waits on
+    // the other: a producer that is often blocked means the consumers are
+    // the bottleneck, and consumers that are often waiting mean the producer
+    // is.
+    [[nodiscard]] double push_wait_seconds() const;
+    [[nodiscard]] double pop_wait_seconds() const;
+
 private:
     mutable std::mutex mutex_;
     std::condition_variable not_full_;
@@ -78,6 +88,8 @@ private:
     // the queue becomes non-empty or reaches this size, not on every packet.
     size_t wanted_ = 1;
     bool shutdown_ = false;
+    std::atomic<uint64_t> push_wait_ns_{0};
+    std::atomic<uint64_t> pop_wait_ns_{0};
 };
 
 }  // namespace netsentinel

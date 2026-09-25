@@ -4,6 +4,14 @@
 
 namespace netsentinel {
 
+namespace {
+uint64_t elapsed_ns(std::chrono::steady_clock::time_point start) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count());
+}
+}  // namespace
+
 QueuedPacket make_queued_packet(const ParsedPacket& parsed) {
     QueuedPacket q;
     q.meta = parsed;
@@ -19,7 +27,13 @@ PacketQueue::PacketQueue(size_t capacity) : capacity_(capacity) {}
 
 bool PacketQueue::push(QueuedPacket packet) {
     std::unique_lock<std::mutex> lock(mutex_);
-    not_full_.wait(lock, [this] { return items_.size() < capacity_ || shutdown_; });
+    if (items_.size() >= capacity_ && !shutdown_) {
+        // Only timed when it has to wait, so the common path stays free of
+        // clock reads (this runs once per packet).
+        const auto start = std::chrono::steady_clock::now();
+        not_full_.wait(lock, [this] { return items_.size() < capacity_ || shutdown_; });
+        push_wait_ns_.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
+    }
 
     if (shutdown_) {
         return false;
@@ -37,6 +51,7 @@ bool PacketQueue::push(QueuedPacket packet) {
 
 std::vector<QueuedPacket> PacketQueue::pop_batch(size_t max_n, std::chrono::milliseconds timeout,
                                                  std::chrono::microseconds linger) {
+    const auto start = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(mutex_);
     wanted_ = max_n;
     not_empty_.wait_for(lock, timeout, [this] { return !items_.empty() || shutdown_; });
@@ -45,6 +60,8 @@ std::vector<QueuedPacket> PacketQueue::pop_batch(size_t max_n, std::chrono::mill
         not_empty_.wait_for(lock, linger,
                             [this, max_n] { return items_.size() >= max_n || shutdown_; });
     }
+
+    pop_wait_ns_.fetch_add(elapsed_ns(start), std::memory_order_relaxed);
 
     std::vector<QueuedPacket> batch;
     const size_t n = std::min(max_n, items_.size());
@@ -86,5 +103,9 @@ size_t PacketQueue::size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return items_.size();
 }
+
+double PacketQueue::push_wait_seconds() const { return push_wait_ns_.load() / 1e9; }
+
+double PacketQueue::pop_wait_seconds() const { return pop_wait_ns_.load() / 1e9; }
 
 }  // namespace netsentinel

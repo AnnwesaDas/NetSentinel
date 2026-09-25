@@ -31,7 +31,8 @@ namespace netsentinel {
 struct FlowTrackerConfig {
     size_t num_shards = 16;
 
-    // Port scan: flag a source IP once it has touched this many distinct
+    // Port scan: flag a source IP once it has sent connection attempts
+    // (TCP SYN, or UDP not from a service port) to this many distinct
     // destination ports within the trailing window.
     int64_t port_scan_window_ms = 5000;
     size_t port_scan_distinct_port_threshold = 10;

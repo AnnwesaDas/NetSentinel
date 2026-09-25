@@ -10,6 +10,22 @@ namespace {
 int64_t timeval_to_ms(const struct timeval& tv) {
     return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
 }
+
+// What the port-scan rule counts: attempts to open a connection, not all
+// traffic. Counting every packet flags busy servers, whose replies go to
+// hundreds of clients' ephemeral ports. For TCP that's a SYN without an ACK.
+// UDP has no handshake, so a datagram sent *from* a well-known service port
+// (below 1024) is treated as a server's reply. A scanner can evade the UDP
+// half by sending from such a port (e.g. nmap --source-port 53).
+bool is_connection_attempt(const ParsedPacket& meta) {
+    if (meta.transport == Transport::kTCP) {
+        return (meta.tcp_flags & kTcpFlagSyn) != 0 && (meta.tcp_flags & kTcpFlagAck) == 0;
+    }
+    if (meta.transport == Transport::kUDP) {
+        return meta.src_port >= 1024;
+    }
+    return false;
+}
 }  // namespace
 
 size_t FlowTracker::FlowKeyHash::operator()(const FlowKey& k) const {
@@ -80,8 +96,8 @@ std::vector<Alert> FlowTracker::observe(const QueuedPacket& packet) {
         PerIpState& state = shard.per_ip[meta.src_ip];
         state.last_seen_ms = now_ms;
 
-        // --- Port scan: distinct destination ports touched within the window ---
-        if (meta.transport == Transport::kTCP || meta.transport == Transport::kUDP) {
+        // --- Port scan: distinct destination ports probed within the window ---
+        if (is_connection_attempt(meta)) {
             state.recent_dst_ports.emplace_back(now_ms, meta.dst_port);
             ++state.port_counts[meta.dst_port];
 
