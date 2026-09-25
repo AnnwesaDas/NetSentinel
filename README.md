@@ -1,38 +1,92 @@
 # NetSentinel
 
-GPU-accelerated network traffic anomaly detector. Captures live packets,
-analyzes them for anomalies (port scans, high-entropy payloads, SYN floods)
-on both a CPU path and a Metal GPU path, and benchmarks the two.
+A multithreaded network traffic anomaly detector in C++17, with an
+optional Apple Metal GPU path. It captures packets with libpcap (live or
+from a .pcap file), parses the Ethernet/IPv4/TCP/UDP headers by hand, and
+flags port scans, SYN floods, high-entropy payloads and known-bad
+signatures. Entropy can run on the CPU or on the GPU, and a reproducible
+benchmark compares the two.
 
-## Architecture
+**Result on an Apple M5:** up to **4.48M packets/sec** end to end with
+entropy on the GPU, against **3.58M** for the best CPU-only setting
+(1.25×), with identical alerts in all 160 benchmark runs.
+
+![Packets/sec on an Apple M5, CPU vs GPU entropy, by batch size](docs/benchmark.svg)
+
+The GPU wins once batches reach 256 packets; at 64 each dispatch's fixed
+cost (~0.22 ms) outweighs the work. Getting here took three rounds of
+measurement: the GPU first *lost* (0.84–0.96×), because a system call on
+every packet in the capture loop capped both modes near 1.5M packets/sec.
+The whole story, with methodology and raw data, is in
+[docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+## Quick start
+
+Requires CMake 3.20+, a C++17 compiler and libpcap (built into macOS;
+`sudo apt-get install libpcap-dev` on Linux).
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+
+python3 scripts/gen_synthetic_attacks.py -o demo.pcap
+./build/netsentinel -r demo.pcap         # replay a capture: one alert per rule
+sudo ./build/netsentinel -i en0          # live capture (Ctrl-C to stop)
+```
+
+On a Mac, add `-DNETSENTINEL_ENABLE_METAL=ON` for the GPU path (one-time
+setup in [docs/METAL_SETUP.md](docs/METAL_SETUP.md)), then add `-g` to run
+entropy on the GPU. A guided walkthrough is in [docs/DEMO.md](docs/DEMO.md).
+
+## How it works
 
 ```
-[Capture Thread] --libpcap--> [Thread-safe Queue]
-                                     |
-                      [Worker Thread Pool] --batches packets-->
-                                     |
-                    [Analysis: CPU path now, Metal GPU path later]
-                    (entropy calc, hash-based signature match,
-                     rule-based anomaly detection)
-                                     |
-                          [Alert/Anomaly Output]
+        libpcap: live interface (-i) or .pcap file (-r)
+                            │
+                  ┌─────────▼─────────┐
+                  │  capture thread   │  parses headers by hand (bounds-checked),
+                  └─────────┬─────────┘  copies each payload
+                            │ push: blocks when full (backpressure, never drops)
+                  ┌─────────▼─────────┐
+                  │   bounded queue   │  mutex + condition variables, 4096 slots
+                  └─────────┬─────────┘
+                            │ pop_batch: up to -b packets, waits up to -L µs to fill
+          ┌─────────────────┼─────────────────┐
+     ┌────▼─────┐      ┌────▼─────┐      ┌────▼─────┐
+     │ worker 1 │      │ worker 2 │  …   │ worker N │   N = cores − 1 (-w)
+     └────┬─────┘      └────┬─────┘      └────┬─────┘
+          └──────── analyze_batch() ──────────┘
+            ├─ entropy ─────────► CPU, or Metal GPU (-g): one dispatch per batch
+            ├─ signature hash        (these two run while the GPU works)
+            └─ port scan, SYN flood ─► FlowTracker: per-IP state, 16 locked shards
+                            │
+                         alerts
 ```
 
-- **Capture**: single producer thread reading raw packets via libpcap,
-  manually parsing Ethernet/IP/TCP headers (no parsing libs).
-- **Queue**: bounded, thread-safe, mutex + condition variable. Backpressure
-  on a full queue (capture blocks on push) rather than dropping packets.
-  Workers pop in batches, not one at a time.
-- **Analysis**: Shannon entropy over payload bytes, hash-based signature
-  matching, and rule-based detection (port scan, high-entropy payload,
-  SYN flood). CPU-only baseline first; Metal compute kernels are a
-  performance upgrade on top of the same logic, not a replacement for it.
-- **Benchmark**: replays a fixed PCAP sample through both paths and reports
-  measured packets/sec, CPU-only vs CPU+GPU.
+- **Capture:** one thread reads packets through libpcap and parses the
+  headers itself (network byte order, variable header lengths, every read
+  bounds-checked against the captured length). The payload is copied
+  because libpcap reuses its buffer for the next packet.
+- **Queue:** bounded and blocking. A full queue slows capture down rather
+  than dropping packets, so an overloaded detector can't silently miss an
+  attack. Workers take packets in batches, and wait briefly to fill one,
+  which is what makes one GPU dispatch per batch worthwhile.
+- **Workers:** each runs every rule on its batch. Entropy goes through an
+  `EntropyBackend`: the CPU one, or a Metal one that starts the GPU and
+  lets the worker run the other rules before collecting the result. If a
+  GPU dispatch fails, that batch falls back to the CPU and the run summary
+  says so.
+- **Shared state:** the port-scan and SYN-flood rules need per-source-IP
+  history across all workers. `FlowTracker` splits it into 16 shards,
+  each with its own lock, so unrelated IPs don't contend.
 
-## Detection rules (Phase 3)
+Every design decision, the alternatives considered and the measurements
+behind them are in [docs/DESIGN.md](docs/DESIGN.md).
 
-Each worker runs `AnalysisEngine::analyze()` per packet:
+## Detection rules
+
+Each worker runs `AnalysisEngine::analyze_batch()` on every batch it takes from the queue:
 
 - **Port scan** — flags a source IP once it has sent connection attempts
   to N distinct destination ports within a trailing window (default: 10
@@ -50,9 +104,8 @@ Each worker runs `AnalysisEngine::analyze()` per packet:
   catch encrypted/compressed C2 or exfil traffic. Note: Shannon entropy
   computed over a *small* sample undercounts true randomness (a 128-byte
   random payload averages ~6.5 bits/byte, a 256-byte one ~7.2) — this is an
-  inherent property of the technique, not a bug, and the threshold/min
-  payload length (`-e`, default min 32B) are tuning knobs to revisit
-  against real traffic in Phase 5, same as queue capacity.
+  inherent property of the technique, not a bug. The threshold (`-e`) and
+  the minimum payload length (32 bytes) are tuning knobs.
 - **Signature match** — hashes the payload (FNV-1a) and compares against a
   small built-in set of known-bad hashes (seeded with the EICAR antivirus
   test string, a standard harmless string for exercising exactly this).
@@ -88,9 +141,8 @@ correct, since every access to it is mutex-protected.
 Testing: real `nmap -sS` runs against a local target for port scan/SYN
 flood (both fire correctly — an SYN scan is itself a mini SYN flood, since
 it never completes handshakes), plus `scripts/gen_synthetic_attacks.py`
-for reproducible offline regression testing (also useful as Phase 5
-benchmark input) covering all four rules plus a benign-traffic
-false-positive check.
+for reproducible offline testing, covering all four rules plus a
+benign-traffic false-positive check (see [docs/DEMO.md](docs/DEMO.md)).
 
 ### Known limitations
 
@@ -130,39 +182,48 @@ Deliberate, understood trade-offs rather than oversights:
   context, such as flagging high entropy only on ports that normally carry
   plaintext.
 
-## Non-goals (v1)
+## Command-line options
 
-No distributed/multi-host capture, no ML-based detection, no live dashboard
-UI beyond console/log output, no parsing beyond Ethernet/IP/TCP headers.
-
-## Build
-
-Requires CMake 3.20+, a C++17 compiler, and libpcap headers/library.
-
-```sh
-cmake -S . -B build
-cmake --build build
-./build/netsentinel -l               # list capture devices
-sudo ./build/netsentinel -i en0      # live capture (see bpf note below)
-./build/netsentinel -r sample.pcap   # offline replay from a pcap file
 ```
+netsentinel -i <device> | -r <file.pcap> [options]
+  -i <device>   capture live from a network interface
+  -r <file>     replay packets from a .pcap file
+  -c <count>    stop after this many parsed packets (0 = unlimited)
+  -l            list available capture devices and exit
+  -w <n>        worker thread count (default: cores - 1)
+  -q <n>        bounded queue capacity (default: 4096)
+  -b <n>        max packets a worker pops per batch (default: 64)
+  -L <usec>     how long a worker waits to fill a batch (default: 2000)
+  -v            print every packet, not just alerts
+  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)
+  -g            compute entropy on the Metal GPU (Metal builds only)
+  -s            silent: count alerts without printing them (for benchmarking)
+```
+
+After a run, netsentinel prints packets/sec, alerts by type, and how much
+of the time the capture thread and the workers spent waiting on each
+other, which shows which side limits throughput. Packets/sec is only
+meaningful when replaying a file; in live capture it includes time spent
+waiting for traffic. For GPU runs, `-b 1024` or more is where `-g` pays off.
+
+## Building in more detail
 
 ### Tests
 
-```sh
-cd build && ctest --output-on-failure
-```
+`ctest --test-dir build` runs six suites (five without Metal), with no
+external test framework:
 
-Four suites (parser, analysis, flow_tracker, queue) with no external test
-framework, so they build anywhere the tool does. They cover the malformed
-input the parser must survive (truncated headers, bogus IHL, a lying
-`total_length`, snaplen cuts), entropy values derivable by hand, both
-directions of every detection rule (fires on attacks, stays quiet on
-traffic that merely resembles them), and the queue's concurrent
-guarantees (FIFO order, backpressure rather than dropping, shutdown that
-drains, no packet loss across 3 producers / 4 consumers).
+- **parser:** malformed input the parser must survive: truncated headers,
+  a bogus IHL, a lying `total_length`, snaplen cuts.
+- **analysis, analysis_engine, flow_tracker:** entropy values derivable by
+  hand, and both directions of every rule: it fires on attacks and stays
+  quiet on traffic that merely resembles them.
+- **queue:** FIFO order, backpressure instead of dropping, a shutdown that
+  drains, no packet loss across 3 producers and 4 consumers, batching.
+- **gpu_entropy** (Metal builds): GPU results match the CPU within
+  1.3e-6 bits/byte, including dispatches from 8 threads at once.
 
-The suites also run clean under sanitizers:
+They also run clean under sanitizers:
 
 ```sh
 cmake -S . -B build-asan -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" \
@@ -171,81 +232,76 @@ cmake -S . -B build-tsan -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
       -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 ```
 
-- **macOS**: libpcap ships with the OS; headers come from the Xcode Command
-  Line Tools (`xcode-select --install`). `brew install libpcap` gets you a
-  newer version if needed.
-- **Linux** (dev/CI convenience only — not the real capture target):
-  `sudo apt-get install libpcap-dev`.
-
 ### macOS `/dev/bpf*` permission
 
-Packet capture on macOS reads from `/dev/bpf*`, which normal user accounts
-can't access by default. `pcap_findalldevs`/`pcap_open_live` will return no
-devices or a permission error until this is resolved. Options, in order of
-convenience:
+Live capture on macOS reads from `/dev/bpf*`, which normal user accounts
+can't open by default: `-l` lists nothing, or `-i` fails with a permission
+error. Options, in order of convenience:
 
-1. **Run with sudo during development** (`sudo ./build/netsentinel`) — simplest,
-   fine for local dev, not something to ship.
+1. **Run with sudo** (`sudo ./build/netsentinel -i en0`): simplest, fine
+   for development.
 2. **One-off chmod**: `sudo chmod 644 /dev/bpf*` (resets on reboot).
-3. **Persistent fix**: add your user to the `access_bpf` group so capture
-   works without sudo across reboots:
+3. **Persistent fix**: add your user to the `access_bpf` group, then log
+   out and back in:
    ```sh
    sudo dseditgroup -o edit -a "$(whoami)" -t user access_bpf
    ```
-   (Log out/in for group membership to take effect.)
 
-### Metal GPU path (Phase 4+)
+Replaying a .pcap file (`-r`) needs no permissions.
 
-Built only on macOS/Apple Silicon, gated behind the `NETSENTINEL_ENABLE_METAL`
-CMake option. Off by default so the CPU-only baseline stays buildable
-everywhere (including this dev/CI container, which has no GPU path).
+### Metal GPU path
 
-One-time setup is a clone of Apple's metal-cpp headers — see
-**[docs/METAL_SETUP.md](docs/METAL_SETUP.md)**. Then:
+macOS on Apple Silicon only, behind the `NETSENTINEL_ENABLE_METAL` CMake
+option, so the CPU version still builds everywhere. It needs Apple's
+metal-cpp headers (setup in [docs/METAL_SETUP.md](docs/METAL_SETUP.md)):
 
 ```sh
-cmake -S . -B build -DNETSENTINEL_ENABLE_METAL=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNETSENTINEL_ENABLE_METAL=ON
 cmake --build build
-./build/metal_smoke_test
+./build/metal_smoke_test                   # checks the GPU path on its own
+./build/netsentinel -r demo.pcap -g        # entropy on the GPU
 ```
 
-`metal_smoke_test` dispatches a trivial vector-add kernel and checks all
-1024 results against CPU-computed values. It exists to validate the
-device/queue/pipeline/buffer path on its own, before any detection logic
-runs on the GPU. Verified on an Apple M5: builds clean, reports `PASS`.
-
-In a Metal build, `-g` moves entropy onto the GPU: each worker sends its
-whole batch (`-b`, default 64 packets; `-L` sets how many microseconds it
-waits to fill one) in one dispatch, and runs the other rules while the GPU
-works. Everything else
-(signatures, port scan, SYN flood) stays on the CPU. The summary line
-reports packets/sec. That figure is only meaningful when replaying a file
-with `-r`; in live capture it includes the time spent waiting for traffic.
+### Benchmark
 
 ```sh
-./build/netsentinel -r sample.pcap        # entropy on CPU
-./build/netsentinel -r sample.pcap -g     # entropy on GPU
+python3 scripts/run_benchmark.py                        # CPU vs GPU, by batch size
+python3 scripts/run_benchmark.py --workers 3,4,6,9      # also compare worker counts
+./build/bench_capture benchmark.pcap                    # capture thread alone, step by step
+./build/bench_analysis benchmark.pcap                   # each rule alone, by thread count
+python3 scripts/plot_benchmark.py                       # redraw docs/benchmark.svg
 ```
 
-The GPU pays off only with larger batches: on an Apple M5 with `-b 1024`
-or more, `-g` is 1.23–1.58× faster end to end than CPU-only, and the
-best GPU setting beats the best CPU one by 1.25×. At the default `-b 64`
-the CPU is usually faster. Full results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+The first run generates `benchmark.pcap` (500k packets, seeded, so it's
+identical every time). Details in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+## Project layout
+
+```
+src/capture/    libpcap wrapper, hand-written header parser
+src/queue/      bounded packet queue, worker pool
+src/analysis/   entropy, signatures, FlowTracker, AnalysisEngine, entropy backends
+src/gpu/        Metal context, GPU entropy backend, smoke test
+shaders/        Metal kernels (embedded into the binary at build time)
+src/bench/      bench_entropy, bench_capture, bench_analysis
+tests/          six test suites
+scripts/        capture generators, benchmark runner, chart
+docs/           design, benchmark, demo, Metal setup, build plan
+```
+
+## Non-goals (v1)
+
+No distributed or multi-host capture, no ML-based detection, no dashboard
+beyond console output, no parsing beyond Ethernet/IPv4/TCP/UDP headers.
 
 ## Project status
 
-Tracking against the phased build plan in `docs/PLAN.md`.
+All phases of the build plan ([docs/PLAN.md](docs/PLAN.md)) are done:
 
-- [x] Phase 0 — Setup & scaffolding
-- [x] Phase 1 — Packet capture + parsing
-- [x] Phase 2 — Thread pool + queue
-- [x] Phase 3 — CPU-only anomaly detection (checkpoint)
-- [x] Phase 4 — Metal GPU kernel port (entropy kernel matches CPU on M5; `-g` runs on M5)
-- [x] Phase 5 — Benchmark (Apple M5 results in [docs/BENCHMARK.md](docs/BENCHMARK.md))
-- [ ] Phase 6 — Docs + demo
-
-## Repo workflow
-
-All development happens on `claude/*` branches, never directly on `main`.
-This is a private working repo — a separate personal repository exists and
-is never touched from here.
+- [x] Phase 0: setup and scaffolding
+- [x] Phase 1: packet capture and parsing
+- [x] Phase 2: thread pool and queue
+- [x] Phase 3: CPU-only anomaly detection
+- [x] Phase 4: Metal GPU kernel port
+- [x] Phase 5: benchmark
+- [x] Phase 6: docs and demo

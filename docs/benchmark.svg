@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" role="img" aria-labelledby="title desc">
+<style>
+  .surface { fill: #fcfcfb; }
+  .ink { fill: #0b0b0b; }
+  .ink-2 { fill: #52514e; }
+  .grid { stroke: #e4e3df; stroke-width: 1; }
+  .axis { stroke: #b5b4ae; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .halo { stroke: #fcfcfb; stroke-width: 4; stroke-linejoin: round; paint-order: stroke; }
+  .cpu { fill: #2a78d6; }
+  .gpu { fill: #eb6834; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .ink { fill: #ffffff; }
+    .ink-2 { fill: #c3c2b7; }
+    .grid { stroke: #2e2e2c; }
+    .axis { stroke: #5f5e5a; }
+    .ref { stroke: #c3c2b7; }
+    .halo { stroke: #1a1a19; }
+    .cpu { fill: #3987e5; }
+    .gpu { fill: #d95926; }
+  }
+</style>
+<title id="title">NetSentinel throughput, CPU vs GPU entropy</title>
+<desc id="desc">Packets per second on an Apple M5 with 9 workers, by maximum batch size. batch 64: CPU 2.55M, GPU 2.33M; batch 256: CPU 3.03M, GPU 3.50M; batch 1024: CPU 3.28M, GPU 4.24M; batch 4096: CPU 3.58M, GPU 4.41M. Before the capture fix both modes were capped near 1.5M.</desc>
+<rect class="surface" width="720" height="400" rx="8"/>
+<text class="ink" x="64" y="30" font-size="16" font-weight="600">Packets/sec, CPU vs GPU entropy</text>
+<text class="ink-2" x="64" y="50" font-size="12">Apple M5, 500k-packet capture, 9 workers, median of 5 runs</text>
+<rect class="cpu" x="64" y="64" width="12" height="12" rx="2"/>
+<text class="ink" x="82" y="74" font-size="12">CPU only</text>
+<rect class="gpu" x="162" y="64" width="12" height="12" rx="2"/>
+<text class="ink" x="180" y="74" font-size="12">Entropy on GPU (-g)</text>
+<line class="axis" x1="64" x2="696" y1="336.0" y2="336.0"/>
+<text class="ink-2" x="56" y="340.0" font-size="11" text-anchor="end">0</text>
+<line class="grid" x1="64" x2="696" y1="287.2" y2="287.2"/>
+<text class="ink-2" x="56" y="291.2" font-size="11" text-anchor="end">1M</text>
+<line class="grid" x1="64" x2="696" y1="238.4" y2="238.4"/>
+<text class="ink-2" x="56" y="242.4" font-size="11" text-anchor="end">2M</text>
+<line class="grid" x1="64" x2="696" y1="189.6" y2="189.6"/>
+<text class="ink-2" x="56" y="193.6" font-size="11" text-anchor="end">3M</text>
+<line class="grid" x1="64" x2="696" y1="140.8" y2="140.8"/>
+<text class="ink-2" x="56" y="144.8" font-size="11" text-anchor="end">4M</text>
+<line class="grid" x1="64" x2="696" y1="92.0" y2="92.0"/>
+<text class="ink-2" x="56" y="96.0" font-size="11" text-anchor="end">5M</text>
+<path class="cpu" d="M94.6,336.0 V215.6 Q94.6,211.6 98.6,211.6 H138.0 Q142.0,211.6 142.0,215.6 V336.0 Z"/>
+<text class="ink" x="118.3" y="205.6" font-size="11" text-anchor="middle">2.55M</text>
+<path class="gpu" d="M144.0,336.0 V226.2 Q144.0,222.2 148.0,222.2 H187.4 Q191.4,222.2 191.4,226.2 V336.0 Z"/>
+<text class="ink" x="167.7" y="216.2" font-size="11" text-anchor="middle">2.33M</text>
+<text class="ink" x="143.0" y="356.0" font-size="12" text-anchor="middle">batch 64</text>
+<text class="ink-2" x="143.0" y="372.0" font-size="11" text-anchor="middle">GPU 0.91×</text>
+<path class="cpu" d="M252.6,336.0 V192.2 Q252.6,188.2 256.6,188.2 H296.0 Q300.0,188.2 300.0,192.2 V336.0 Z"/>
+<text class="ink" x="276.3" y="182.2" font-size="11" text-anchor="middle">3.03M</text>
+<path class="gpu" d="M302.0,336.0 V169.4 Q302.0,165.4 306.0,165.4 H345.4 Q349.4,165.4 349.4,169.4 V336.0 Z"/>
+<text class="ink" x="325.7" y="159.4" font-size="11" text-anchor="middle">3.50M</text>
+<text class="ink" x="301.0" y="356.0" font-size="12" text-anchor="middle">batch 256</text>
+<text class="ink-2" x="301.0" y="372.0" font-size="11" text-anchor="middle">GPU 1.15×</text>
+<path class="cpu" d="M410.6,336.0 V180.0 Q410.6,176.0 414.6,176.0 H454.0 Q458.0,176.0 458.0,180.0 V336.0 Z"/>
+<text class="ink" x="434.3" y="170.0" font-size="11" text-anchor="middle">3.28M</text>
+<path class="gpu" d="M460.0,336.0 V133.0 Q460.0,129.0 464.0,129.0 H503.4 Q507.4,129.0 507.4,133.0 V336.0 Z"/>
+<text class="ink" x="483.7" y="123.0" font-size="11" text-anchor="middle">4.24M</text>
+<text class="ink" x="459.0" y="356.0" font-size="12" text-anchor="middle">batch 1024</text>
+<text class="ink-2" x="459.0" y="372.0" font-size="11" text-anchor="middle">GPU 1.29×</text>
+<path class="cpu" d="M568.6,336.0 V165.2 Q568.6,161.2 572.6,161.2 H612.0 Q616.0,161.2 616.0,165.2 V336.0 Z"/>
+<text class="ink" x="592.3" y="155.2" font-size="11" text-anchor="middle">3.58M</text>
+<path class="gpu" d="M618.0,336.0 V124.7 Q618.0,120.7 622.0,120.7 H661.4 Q665.4,120.7 665.4,124.7 V336.0 Z"/>
+<text class="ink" x="641.7" y="114.7" font-size="11" text-anchor="middle">4.41M</text>
+<text class="ink" x="617.0" y="356.0" font-size="12" text-anchor="middle">batch 4096</text>
+<text class="ink-2" x="617.0" y="372.0" font-size="11" text-anchor="middle">GPU 1.23×</text>
+<line class="ref" x1="64" x2="696" y1="262.8" y2="262.8"/>
+<text class="ink-2 halo" x="696" y="256.8" font-size="11" text-anchor="end">before the capture fix: both capped near 1.5M</text>
+</svg>

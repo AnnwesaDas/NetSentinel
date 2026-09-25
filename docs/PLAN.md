@@ -85,10 +85,12 @@ packets/sec, CPU-only vs CPU+GPU, on the same sample.
 
 **Success**: a real, reproducible number, not an estimate.
 
-**Status: done.** On the Apple M5, CPU-only runs at 1.21–1.47M
-packets/sec end to end and the GPU path at 0.84–0.96× of that; the
-entropy stage alone runs up to 4.9× faster than one CPU core at large
-batches. Results and analysis in docs/BENCHMARK.md.
+**Status: done.** On the Apple M5, after three rounds of measurement:
+up to 3.58M packets/sec end to end on the CPU and 4.48M with entropy on
+the GPU (1.25×), with identical alerts in all 160 runs. The first rounds
+had the GPU slower (0.84–0.96×) because a system call per packet in the
+capture loop capped both modes near 1.5M; finding and fixing that is
+described in docs/BENCHMARK.md and docs/DESIGN.md.
 `scripts/run_benchmark.py`
 runs the entropy stage alone (`bench_entropy`) and the full pipeline with
 and without `-g` on a seeded 500k-packet capture, and checks that
@@ -100,6 +102,12 @@ batching linger; methodology and details in docs/BENCHMARK.md.
 README with architecture diagram, benchmark results/chart, setup
 instructions including the macOS `/dev/bpf*` note. Can be written
 incrementally alongside earlier phases.
+
+**Status: done.** README with architecture diagram, results chart
+(`docs/benchmark.svg`, drawn by `scripts/plot_benchmark.py`), quick start
+and the macOS `/dev/bpf*` note; docs/DESIGN.md explains each design
+decision and the measurements behind it; docs/DEMO.md is a step-by-step
+demo.
 
 ## Timeline target
 - CPU-only checkpoint (end of Phase 3): Week 3-4

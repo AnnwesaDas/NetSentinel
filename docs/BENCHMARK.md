@@ -385,7 +385,8 @@ settles both.
 
 ## Round 3: after the capture fix (M5)
 
-`python3 scripts/run_benchmark.py --skip-entropy --workers 3,4,6,9`:
+`python3 scripts/run_benchmark.py --skip-entropy --workers 3,4,6,9`
+(medians: [results/m5_round3_medians.csv](results/m5_round3_medians.csv)):
 500k packets, linger 2 ms, median of 5, CPU and GPU runs alternated.
 Correctness held in all 160 runs: 188,341 high-entropy alerts every time.
 
