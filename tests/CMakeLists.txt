@@ -1,7 +1,16 @@
-foreach(test_name parser analysis flow_tracker queue)
+foreach(test_name parser analysis analysis_engine flow_tracker queue)
   add_executable(test_${test_name} test_${test_name}.cpp)
   target_link_libraries(test_${test_name} PRIVATE netsentinel_core)
   target_include_directories(test_${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(test_${test_name} PRIVATE -Wall -Wextra)
   add_test(NAME ${test_name} COMMAND test_${test_name})
 endforeach()
+
+# Only exists in -DNETSENTINEL_ENABLE_METAL=ON builds.
+if(TARGET netsentinel_gpu)
+  add_executable(test_gpu_entropy test_gpu_entropy.cpp)
+  target_link_libraries(test_gpu_entropy PRIVATE netsentinel_core netsentinel_gpu)
+  target_include_directories(test_gpu_entropy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(test_gpu_entropy PRIVATE -Wall -Wextra)
+  add_test(NAME gpu_entropy COMMAND test_gpu_entropy)
+endif()

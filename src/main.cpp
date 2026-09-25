@@ -1,18 +1,19 @@
-// Phase 3: CPU-only anomaly detection on top of the Phase 2 capture ->
-// queue -> worker pool pipeline. Each worker runs AnalysisEngine::analyze
-// per packet (entropy, signature match, port scan, SYN flood); alerts are
-// printed as they fire. Per-packet tracing is now opt-in via -v, since a
-// real scan/flood test generates far too many packets to read live
-// otherwise.
+// Capture thread -> bounded queue -> worker pool. Each worker hands its
+// batch to AnalysisEngine::analyze_batch (entropy, signature match, port
+// scan, SYN flood) and alerts are printed as they fire. Entropy runs on the
+// CPU by default, or on the Metal GPU with -g in Metal-enabled builds.
+// Per-packet tracing is opt-in via -v.
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -22,6 +23,10 @@
 #include "netsentinel/packet.hpp"
 #include "netsentinel/packet_queue.hpp"
 #include "netsentinel/worker_pool.hpp"
+
+#ifdef NETSENTINEL_HAS_METAL
+#include "netsentinel/gpu/gpu_entropy_backend.hpp"
+#endif
 
 namespace {
 
@@ -103,7 +108,8 @@ void print_usage(const char* argv0) {
                   "  -q <n>        bounded queue capacity (default: 4096)\n"
                   "  -b <n>        max packets a worker pops per batch (default: 64)\n"
                   "  -v            print every packet, not just alerts\n"
-                  "  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)\n",
+                  "  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)\n"
+                  "  -g            compute entropy on the Metal GPU (Metal builds only)\n",
                   argv0);
 }
 
@@ -115,6 +121,7 @@ int main(int argc, char** argv) {
     int max_packets = 0;
     bool list_only = false;
     bool verbose = false;
+    bool use_gpu = false;
     size_t num_workers = std::max(1u, std::thread::hardware_concurrency());
     size_t queue_capacity = 4096;
     size_t batch_size = 64;
@@ -142,6 +149,8 @@ int main(int argc, char** argv) {
             batch_size = static_cast<size_t>(value);
         } else if (std::strcmp(argv[i], "-v") == 0) {
             verbose = true;
+        } else if (std::strcmp(argv[i], "-g") == 0) {
+            use_gpu = true;
         } else if (std::strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
             char* end = nullptr;
             const char* text = argv[++i];
@@ -197,25 +206,46 @@ int main(int argc, char** argv) {
     g_capture_for_signal = &capture;
     std::signal(SIGINT, handle_sigint);
 
+    std::unique_ptr<netsentinel::EntropyBackend> backend;
+    if (use_gpu) {
+#ifdef NETSENTINEL_HAS_METAL
+        auto gpu = std::make_unique<netsentinel::gpu::GpuEntropyBackend>();
+        if (!gpu->ok()) {
+            std::fprintf(stderr, "GPU unavailable: %s\n", gpu->error().c_str());
+            return EXIT_FAILURE;
+        }
+        backend = std::move(gpu);
+#else
+        std::fprintf(stderr,
+                      "-g needs a Metal build: cmake -S . -B build -DNETSENTINEL_ENABLE_METAL=ON\n");
+        return EXIT_FAILURE;
+#endif
+    }
+
     netsentinel::AnalysisConfig analysis_config;
     analysis_config.entropy_threshold = entropy_threshold;
-    netsentinel::AnalysisEngine engine(print_alert, analysis_config);
+    netsentinel::AnalysisEngine engine(print_alert, analysis_config, std::move(backend));
 
     netsentinel::PacketQueue queue(queue_capacity);
     netsentinel::WorkerPool pool(
         num_workers, queue,
-        [&](const netsentinel::QueuedPacket& pkt) {
+        [&](const std::vector<netsentinel::QueuedPacket>& batch) {
             if (verbose) {
-                print_packet(pkt);
+                for (const auto& pkt : batch) {
+                    print_packet(pkt);
+                }
             }
-            engine.analyze(pkt);
+            engine.analyze_batch(batch);
         },
         batch_size);
-    pool.start();
 
-    std::printf("capturing from %s ... (%zu worker(s), queue capacity %zu, batch size %zu)\n",
+    std::printf("capturing from %s ... (%zu worker(s), queue capacity %zu, batch size %zu, "
+                "entropy on %s)\n",
                 device.empty() ? pcap_file.c_str() : device.c_str(), num_workers, queue_capacity,
-                batch_size);
+                batch_size, engine.backend_name().c_str());
+
+    const auto started = std::chrono::steady_clock::now();
+    pool.start();
 
     int delivered = 0;
     {
@@ -231,10 +261,20 @@ int main(int argc, char** argv) {
 
     queue.shutdown();
     pool.join();
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
-    std::printf("done — %d packet(s) captured, %llu processed, %llu alert(s)\n", delivered,
-                static_cast<unsigned long long>(pool.processed_count()),
-                static_cast<unsigned long long>(g_alert_count.load()));
+    const uint64_t processed = pool.processed_count();
+    std::printf("done — %d packet(s) captured, %llu processed, %llu alert(s), %.3fs, "
+                "%.0f packets/sec\n",
+                delivered, static_cast<unsigned long long>(processed),
+                static_cast<unsigned long long>(g_alert_count.load()), seconds,
+                seconds > 0 ? processed / seconds : 0.0);
+    if (engine.backend_fallbacks() > 0) {
+        std::printf("warning: %llu batch(es) fell back to CPU entropy after a %s failure\n",
+                    static_cast<unsigned long long>(engine.backend_fallbacks()),
+                    engine.backend_name().c_str());
+    }
 
     return EXIT_SUCCESS;
 }

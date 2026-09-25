@@ -31,15 +31,6 @@ set_target_properties(pcap::pcap PROPERTIES
 # --- threading ---------------------------------------------------------------
 find_package(Threads REQUIRED)
 
-# --- Metal (macOS / Apple Silicon only) --------------------------------------
-if(NETSENTINEL_ENABLE_METAL)
-  if(NOT APPLE)
-    message(FATAL_ERROR "NETSENTINEL_ENABLE_METAL requires macOS.")
-  endif()
-  # metal-cpp is a headers-only vendored dependency; see docs/METAL_SETUP.md (added in Phase 4).
-  # Placeholder for now — Phase 4 wires this up for real.
-endif()
-
 # --- core library (everything except main(), so tests can link it) -----------
 add_library(netsentinel_core
   src/capture/capture.cpp
@@ -48,6 +39,7 @@ add_library(netsentinel_core
   src/queue/packet_queue.cpp
   src/queue/worker_pool.cpp
   src/analysis/entropy.cpp
+  src/analysis/entropy_backend.cpp
   src/analysis/signature_db.cpp
   src/analysis/alert.cpp
   src/analysis/flow_tracker.cpp
@@ -57,10 +49,76 @@ target_link_libraries(netsentinel_core PUBLIC pcap::pcap Threads::Threads)
 target_include_directories(netsentinel_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(netsentinel_core PRIVATE -Wall -Wextra)
 
+# --- Metal (macOS / Apple Silicon only) --------------------------------------
+if(NETSENTINEL_ENABLE_METAL)
+  if(NOT APPLE)
+    message(FATAL_ERROR "NETSENTINEL_ENABLE_METAL requires macOS.")
+  endif()
+
+  include(cmake/NetsentinelShaders.cmake)
+
+  # metal-cpp: Apple's C++ bindings for Metal/Foundation/QuartzCore, cloned
+  # into third_party/ by hand (see docs/METAL_SETUP.md). Checked here so a
+  # missing copy fails with instructions instead of a missing-header error.
+  set(METAL_CPP_DIR "${CMAKE_SOURCE_DIR}/third_party/metal-cpp" CACHE PATH
+      "Path to a metal-cpp checkout (see docs/METAL_SETUP.md)")
+  if(NOT EXISTS "${METAL_CPP_DIR}/Metal/Metal.hpp")
+    message(FATAL_ERROR
+      "metal-cpp not found at ${METAL_CPP_DIR}.\n"
+      "Download it and set it up first — see docs/METAL_SETUP.md.\n"
+      "If you placed it somewhere else, pass -DMETAL_CPP_DIR=/path/to/metal-cpp.")
+  endif()
+
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+
+  # Generated headers (embedded .metal shader sources) live under the
+  # build directory, included as "netsentinel/gpu/generated/...", matching
+  # this project's normal include convention.
+  set(NETSENTINEL_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+  set(SHADER_HEADER_DIR "${NETSENTINEL_GENERATED_DIR}/netsentinel/gpu/generated")
+  netsentinel_embed_shader(
+    "${CMAKE_SOURCE_DIR}/shaders/vector_add.metal"
+    kVectorAddShaderSource
+    "${SHADER_HEADER_DIR}/vector_add_shader.hpp")
+  netsentinel_embed_shader(
+    "${CMAKE_SOURCE_DIR}/shaders/payload_entropy.metal"
+    kPayloadEntropyShaderSource
+    "${SHADER_HEADER_DIR}/payload_entropy_shader.hpp")
+
+  # The generated headers are listed as sources so their embed steps run
+  # before anything that links this library is compiled.
+  add_library(netsentinel_gpu
+    src/gpu/metal_context.cpp
+    src/gpu/gpu_entropy_backend.cpp
+    "${SHADER_HEADER_DIR}/vector_add_shader.hpp"
+    "${SHADER_HEADER_DIR}/payload_entropy_shader.hpp"
+  )
+  target_include_directories(netsentinel_gpu PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${NETSENTINEL_GENERATED_DIR}
+  )
+  target_include_directories(netsentinel_gpu SYSTEM PUBLIC "${METAL_CPP_DIR}")
+  target_link_libraries(netsentinel_gpu PUBLIC
+    netsentinel_core
+    ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} ${QUARTZCORE_FRAMEWORK}
+  )
+  target_compile_options(netsentinel_gpu PRIVATE -Wall -Wextra)
+
+  add_executable(metal_smoke_test src/gpu/vector_add_smoke_test.cpp)
+  target_link_libraries(metal_smoke_test PRIVATE netsentinel_gpu)
+  target_compile_options(metal_smoke_test PRIVATE -Wall -Wextra)
+endif()
+
 # --- executable ----------------------------------------------------------------
 add_executable(netsentinel src/main.cpp)
 target_link_libraries(netsentinel PRIVATE netsentinel_core)
 target_compile_options(netsentinel PRIVATE -Wall -Wextra)
+if(TARGET netsentinel_gpu)
+  target_link_libraries(netsentinel PRIVATE netsentinel_gpu)
+  target_compile_definitions(netsentinel PRIVATE NETSENTINEL_HAS_METAL)
+endif()
 
 # --- tests --------------------------------------------------------------------
 option(NETSENTINEL_BUILD_TESTS "Build the unit tests" ON)

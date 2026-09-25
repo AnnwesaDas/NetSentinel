@@ -31,11 +31,10 @@ void WorkerPool::join() {
 void WorkerPool::worker_loop() {
     while (true) {
         auto batch = queue_.pop_batch(batch_size_, poll_timeout_);
-        for (const auto& pkt : batch) {
-            analyze_(pkt);
-            processed_.fetch_add(1, std::memory_order_relaxed);
-        }
-        if (batch.empty() && queue_.is_finished()) {
+        if (!batch.empty()) {
+            analyze_(batch);
+            processed_.fetch_add(batch.size(), std::memory_order_relaxed);
+        } else if (queue_.is_finished()) {
             break;
         }
     }

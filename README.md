@@ -180,8 +180,29 @@ Built only on macOS/Apple Silicon, gated behind the `NETSENTINEL_ENABLE_METAL`
 CMake option. Off by default so the CPU-only baseline stays buildable
 everywhere (including this dev/CI container, which has no GPU path).
 
+One-time setup is a clone of Apple's metal-cpp headers — see
+**[docs/METAL_SETUP.md](docs/METAL_SETUP.md)**. Then:
+
 ```sh
 cmake -S . -B build -DNETSENTINEL_ENABLE_METAL=ON
+cmake --build build
+./build/metal_smoke_test
+```
+
+`metal_smoke_test` dispatches a trivial vector-add kernel and checks all
+1024 results against CPU-computed values. It exists to validate the
+device/queue/pipeline/buffer path on its own, before any detection logic
+runs on the GPU. Verified on an Apple M5: builds clean, reports `PASS`.
+
+In a Metal build, `-g` moves entropy onto the GPU: each worker sends its
+whole batch (`-b`, default 64 packets) in one dispatch. Everything else
+(signatures, port scan, SYN flood) stays on the CPU. The summary line
+reports packets/sec. That figure is only meaningful when replaying a file
+with `-r`; in live capture it includes the time spent waiting for traffic.
+
+```sh
+./build/netsentinel -r sample.pcap        # entropy on CPU
+./build/netsentinel -r sample.pcap -g     # entropy on GPU
 ```
 
 ## Project status
@@ -192,7 +213,7 @@ Tracking against the phased build plan in `docs/PLAN.md`.
 - [x] Phase 1 — Packet capture + parsing
 - [x] Phase 2 — Thread pool + queue
 - [x] Phase 3 — CPU-only anomaly detection (checkpoint)
-- [ ] Phase 4 — Metal GPU kernel port
+- [~] Phase 4 — Metal GPU kernel port (entropy kernel matches CPU on M5; `-g` GPU mode awaiting first M5 run)
 - [ ] Phase 5 — Benchmark
 - [ ] Phase 6 — Docs + demo
 

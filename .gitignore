@@ -7,3 +7,4 @@ compile_commands.json
 .DS_Store
 .vscode/
 .idea/
+third_party/

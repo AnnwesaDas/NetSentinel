@@ -50,11 +50,30 @@ its own.
 cases of each anomaly type.
 
 ## Phase 4 — Metal GPU kernel port
-metal-cpp setup; build a throwaway "hello world" compute kernel (vector
-add) first to validate device/queue/pipeline/buffer plumbing before
-porting real logic. Port the hot loop (entropy/hash/pattern matching)
-into Metal compute kernels. The entropy histogram is the trickiest part
-to parallelize correctly — atomics or a per-threadgroup reduction.
+
+**Status: entropy kernel matches the CPU on the M5.** metal-cpp
+integration, a `MetalContext` wrapper (device/queue/pipelines), and a
+vector-add smoke test pass on the M5. `shaders/payload_entropy.metal`
+computes entropy for a batch of payloads (one threadgroup each, atomic
+threadgroup histogram, tree reduction). `tests/test_gpu_entropy.cpp`
+compares it with the CPU implementation on 2,020 payloads. Result on the
+M5: max |cpu - gpu| = 1.15e-6, the same alert decision for all 784
+alerting payloads and every other one, 2,035 checks, 0 failures.
+
+GPU mode in the pipeline (awaiting its first M5 run): workers hand
+whole batches to `AnalysisEngine::analyze_batch`, which computes entropy
+through an `EntropyBackend`, either CPU or `GpuEntropyBackend` (one Metal
+dispatch per batch, `-g`). All workers share one `MetalContext`; the GPU
+test now also dispatches from 8 threads at once and compares the GPU
+backend with the CPU one. If a GPU dispatch fails, that batch is computed
+on the CPU and the run summary reports how many batches fell back, so a
+benchmark can't silently include CPU work.
+
+Original scope: port the hot loop
+(entropy/hash/pattern matching) into Metal compute kernels. The entropy
+histogram is the trickiest part to parallelize correctly — atomics or a
+per-threadgroup reduction. Don't debug the pipeline and the anomaly math
+at the same time — that's exactly why the smoke test exists.
 
 **Success**: GPU path produces identical results to the CPU path on the
 same input.

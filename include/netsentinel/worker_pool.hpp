@@ -1,6 +1,6 @@
-// Fixed-size pool of worker threads consuming batches from a PacketQueue.
-// Phase 2 scope: just draining the queue and invoking an analysis callback
-// per packet. The callback is a stand-in for Phase 3's real anomaly rules.
+// Fixed-size pool of worker threads, each draining batches from a
+// PacketQueue and handing every batch to one analysis callback. Batches
+// rather than single packets, so a GPU backend can process one per dispatch.
 #pragma once
 
 #include <atomic>
@@ -17,7 +17,7 @@ namespace netsentinel {
 
 class WorkerPool {
 public:
-    using AnalysisFn = std::function<void(const QueuedPacket&)>;
+    using AnalysisFn = std::function<void(const std::vector<QueuedPacket>&)>;
 
     WorkerPool(size_t num_workers, PacketQueue& queue, AnalysisFn analyze,
                size_t batch_size = 64,
