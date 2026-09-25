@@ -60,7 +60,7 @@ compares it with the CPU implementation on 2,020 payloads. Result on the
 M5: max |cpu - gpu| = 1.15e-6, the same alert decision for all 784
 alerting payloads and every other one, 2,035 checks, 0 failures.
 
-GPU mode in the pipeline (awaiting its first M5 run): workers hand
+GPU mode in the pipeline (`-g`, runs on the M5): workers hand
 whole batches to `AnalysisEngine::analyze_batch`, which computes entropy
 through an `EntropyBackend`, either CPU or `GpuEntropyBackend` (one Metal
 dispatch per batch, `-g`). All workers share one `MetalContext`; the GPU
@@ -84,6 +84,17 @@ identically for both runs — not live traffic). Measure and log real
 packets/sec, CPU-only vs CPU+GPU, on the same sample.
 
 **Success**: a real, reproducible number, not an estimate.
+
+**Status: done.** On the Apple M5, CPU-only runs at 1.21–1.47M
+packets/sec end to end and the GPU path at 0.84–0.96× of that; the
+entropy stage alone runs up to 4.9× faster than one CPU core at large
+batches. Results and analysis in docs/BENCHMARK.md.
+`scripts/run_benchmark.py`
+runs the entropy stage alone (`bench_entropy`) and the full pipeline with
+and without `-g` on a seeded 500k-packet capture, and checks that
+per-packet alert counts match across every run. Building it exposed a
+queue bottleneck (average batch 1.1 packets with 4 workers), fixed with a
+batching linger; methodology and details in docs/BENCHMARK.md.
 
 ## Phase 6 — Docs + demo
 README with architecture diagram, benchmark results/chart, setup

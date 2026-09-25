@@ -108,7 +108,19 @@ Deliberate, understood trade-offs rather than oversights:
   source IP may land in different concurrent worker batches, so the exact
   count/timing of debounced alerts varies slightly run to run. The
   underlying per-IP state is always correct — every access is
-  mutex-protected — only the alert cadence is loose.
+  mutex-protected — only the alert cadence is loose. On the stress capture,
+  all 20 scanning hosts are flagged at every batch size and worker count;
+  only the number of repeat alerts changes.
+- **Busy servers look like port scanners.** The rule counts every packet's
+  destination port, so a server replying to hundreds of clients (each on
+  its own ephemeral port) trips it: about 1,100 false alerts on the
+  benchmark capture. Counting only connection attempts (TCP SYN without
+  ACK) is the usual fix.
+- **Encrypted traffic trips the entropy rule.** TLS payloads are
+  indistinguishable from random bytes, so on real traffic the high-entropy
+  alert fires on most full-size encrypted packets (about 188k of 500k on the
+  benchmark capture). Entropy alone can't tell legitimate TLS from exfil;
+  it needs context such as expected ports or protocol checks.
 
 ## Non-goals (v1)
 
@@ -213,8 +225,8 @@ Tracking against the phased build plan in `docs/PLAN.md`.
 - [x] Phase 1 — Packet capture + parsing
 - [x] Phase 2 — Thread pool + queue
 - [x] Phase 3 — CPU-only anomaly detection (checkpoint)
-- [~] Phase 4 — Metal GPU kernel port (entropy kernel matches CPU on M5; `-g` GPU mode awaiting first M5 run)
-- [ ] Phase 5 — Benchmark
+- [x] Phase 4 — Metal GPU kernel port (entropy kernel matches CPU on M5; `-g` runs on M5)
+- [x] Phase 5 — Benchmark (Apple M5 results in [docs/BENCHMARK.md](docs/BENCHMARK.md))
 - [ ] Phase 6 — Docs + demo
 
 ## Repo workflow

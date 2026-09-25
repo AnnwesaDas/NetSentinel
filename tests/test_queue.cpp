@@ -160,6 +160,87 @@ void test_queued_packet_owns_its_payload() {
     CHECK(queued.meta.payload == nullptr);  // dangling pointer must be cleared
 }
 
+void test_linger_returns_partial_batch_after_timeout() {
+    // Fewer packets than asked for, and nothing more coming: after lingering
+    // the consumer takes what's there rather than waiting forever.
+    PacketQueue queue(100);
+    for (uint16_t i = 0; i < 3; ++i) queue.push(packet_with_id(i));
+    const auto start = std::chrono::steady_clock::now();
+    auto batch = queue.pop_batch(64, std::chrono::milliseconds(100), std::chrono::milliseconds(20));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK_EQ_SIZE(batch.size(), 3u);
+    CHECK(elapsed >= std::chrono::milliseconds(15));   // it did wait for more
+    CHECK(elapsed < std::chrono::milliseconds(90));    // but only about the linger
+}
+
+void test_linger_returns_early_once_batch_is_full() {
+    // A packet is waiting; the rest of the batch arrives shortly after. The
+    // consumer must return as soon as the batch fills, not at the end of a
+    // long linger.
+    PacketQueue queue(100);
+    queue.push(packet_with_id(0));
+    std::thread producer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        for (uint16_t i = 1; i < 10; ++i) queue.push(packet_with_id(i));
+    });
+    const auto start = std::chrono::steady_clock::now();
+    auto batch = queue.pop_batch(10, std::chrono::milliseconds(100), std::chrono::milliseconds(500));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    producer.join();
+    CHECK_EQ_SIZE(batch.size(), 10u);
+    CHECK(elapsed < std::chrono::milliseconds(250));
+    for (uint16_t i = 0; i < 10; ++i) CHECK(batch[i].meta.src_port == i);  // still FIFO
+}
+
+void test_shutdown_interrupts_linger() {
+    PacketQueue queue(100);
+    queue.push(packet_with_id(1));
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        queue.shutdown();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    auto batch = queue.pop_batch(64, std::chrono::milliseconds(100), std::chrono::milliseconds(2000));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    stopper.join();
+    CHECK_EQ_SIZE(batch.size(), 1u);  // the queued packet is still delivered
+    CHECK(elapsed < std::chrono::milliseconds(1000));
+    CHECK(queue.is_finished());
+}
+
+void test_consumers_get_full_batches_under_load() {
+    // The failure this guards against: consumers faster than the producer
+    // each taking ~1 packet per call. With linger, batches should be full.
+    constexpr size_t kPackets = 20000, kBatch = 64;
+    PacketQueue queue(4096);
+    std::atomic<size_t> consumed{0}, batches{0};
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < 4; ++c) {
+        consumers.emplace_back([&] {
+            while (true) {
+                auto batch = queue.pop_batch(kBatch, std::chrono::milliseconds(20),
+                                             std::chrono::milliseconds(2));
+                if (!batch.empty()) {
+                    consumed.fetch_add(batch.size());
+                    batches.fetch_add(1);
+                } else if (queue.is_finished()) {
+                    break;
+                }
+            }
+        });
+    }
+    for (size_t i = 0; i < kPackets; ++i) queue.push(packet_with_id(static_cast<uint16_t>(i)));
+    queue.shutdown();
+    for (auto& t : consumers) t.join();
+
+    CHECK_EQ_SIZE(consumed.load(), kPackets);
+    const double average = static_cast<double>(consumed.load()) / batches.load();
+    if (average < kBatch * 0.5) {
+        std::fprintf(stderr, "  average batch %.1f of %zu\n", average, kBatch);
+    }
+    CHECK(average >= kBatch * 0.5);
+}
+
 }  // namespace
 
 int main() {
@@ -171,5 +252,9 @@ int main() {
     test_shutdown_drains_remaining_packets();
     test_no_packets_lost_across_many_producers_and_consumers();
     test_queued_packet_owns_its_payload();
+    test_linger_returns_partial_batch_after_timeout();
+    test_linger_returns_early_once_batch_is_full();
+    test_shutdown_interrupts_linger();
+    test_consumers_get_full_batches_under_load();
     return report("queue");
 }

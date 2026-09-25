@@ -3,11 +3,13 @@
 namespace netsentinel {
 
 WorkerPool::WorkerPool(size_t num_workers, PacketQueue& queue, AnalysisFn analyze,
-                        size_t batch_size, std::chrono::milliseconds poll_timeout)
+                        size_t batch_size, std::chrono::milliseconds poll_timeout,
+                        std::chrono::microseconds linger)
     : queue_(queue),
       analyze_(std::move(analyze)),
       batch_size_(batch_size),
       poll_timeout_(poll_timeout),
+      linger_(linger),
       num_workers_(num_workers == 0 ? 1 : num_workers) {}
 
 WorkerPool::~WorkerPool() { join(); }
@@ -30,10 +32,11 @@ void WorkerPool::join() {
 
 void WorkerPool::worker_loop() {
     while (true) {
-        auto batch = queue_.pop_batch(batch_size_, poll_timeout_);
+        auto batch = queue_.pop_batch(batch_size_, poll_timeout_, linger_);
         if (!batch.empty()) {
             analyze_(batch);
             processed_.fetch_add(batch.size(), std::memory_order_relaxed);
+            batches_.fetch_add(1, std::memory_order_relaxed);
         } else if (queue_.is_finished()) {
             break;
         }

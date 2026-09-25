@@ -115,9 +115,16 @@ endif()
 add_executable(netsentinel src/main.cpp)
 target_link_libraries(netsentinel PRIVATE netsentinel_core)
 target_compile_options(netsentinel PRIVATE -Wall -Wextra)
+# Entropy stage on its own, CPU vs GPU (see docs/BENCHMARK.md).
+add_executable(bench_entropy src/bench/bench_entropy.cpp)
+target_link_libraries(bench_entropy PRIVATE netsentinel_core)
+target_compile_options(bench_entropy PRIVATE -Wall -Wextra)
+
 if(TARGET netsentinel_gpu)
-  target_link_libraries(netsentinel PRIVATE netsentinel_gpu)
-  target_compile_definitions(netsentinel PRIVATE NETSENTINEL_HAS_METAL)
+  foreach(exe netsentinel bench_entropy)
+    target_link_libraries(${exe} PRIVATE netsentinel_gpu)
+    target_compile_definitions(${exe} PRIVATE NETSENTINEL_HAS_METAL)
+  endforeach()
 endif()
 
 # --- tests --------------------------------------------------------------------

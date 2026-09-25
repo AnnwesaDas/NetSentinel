@@ -33,6 +33,9 @@ namespace {
 netsentinel::Capture* g_capture_for_signal = nullptr;
 std::mutex g_stdout_mutex;
 std::atomic<uint64_t> g_alert_count{0};
+// Indexed by AnomalyType, for the per-type summary line.
+std::atomic<uint64_t> g_alerts_by_type[4] = {};
+bool g_quiet = false;  // set once before workers start
 
 void handle_sigint(int) {
     if (g_capture_for_signal != nullptr) {
@@ -76,9 +79,13 @@ void print_packet(const netsentinel::QueuedPacket& q) {
 }
 
 void print_alert(const netsentinel::Alert& alert) {
+    g_alert_count.fetch_add(1, std::memory_order_relaxed);
+    g_alerts_by_type[static_cast<size_t>(alert.type)].fetch_add(1, std::memory_order_relaxed);
+    if (g_quiet) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(g_stdout_mutex);
     std::printf("%s\n", netsentinel::format_alert(alert).c_str());
-    g_alert_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Parses a non-negative integer option value. Returns false (leaving
@@ -104,12 +111,13 @@ void print_usage(const char* argv0) {
                   "  -r <file>     replay packets from a .pcap file\n"
                   "  -c <count>    stop after this many parsed packets (0 = unlimited)\n"
                   "  -l            list available capture devices and exit\n"
-                  "  -w <n>        worker thread count (default: hardware concurrency)\n"
+                  "  -w <n>        worker thread count (default: cores - 1)\n"
                   "  -q <n>        bounded queue capacity (default: 4096)\n"
                   "  -b <n>        max packets a worker pops per batch (default: 64)\n"
                   "  -v            print every packet, not just alerts\n"
                   "  -e <bits>     high-entropy alert threshold, bits/byte (default: 7.0)\n"
-                  "  -g            compute entropy on the Metal GPU (Metal builds only)\n",
+                  "  -g            compute entropy on the Metal GPU (Metal builds only)\n"
+                  "  -s            silent: count alerts without printing them (for benchmarking)\n",
                   argv0);
 }
 
@@ -122,7 +130,10 @@ int main(int argc, char** argv) {
     bool list_only = false;
     bool verbose = false;
     bool use_gpu = false;
-    size_t num_workers = std::max(1u, std::thread::hardware_concurrency());
+    // One core is left for the capture thread, which feeds every worker.
+    // hardware_concurrency() returns 0 when the count is unknown.
+    const unsigned cores = std::thread::hardware_concurrency();
+    size_t num_workers = cores > 1 ? cores - 1 : 1;
     size_t queue_capacity = 4096;
     size_t batch_size = 64;
     double entropy_threshold = 7.0;
@@ -151,6 +162,9 @@ int main(int argc, char** argv) {
             verbose = true;
         } else if (std::strcmp(argv[i], "-g") == 0) {
             use_gpu = true;
+        } else if (std::strcmp(argv[i], "-s") == 0) {
+            g_quiet = true;
+
         } else if (std::strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
             char* end = nullptr;
             const char* text = argv[++i];
@@ -265,11 +279,23 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     const uint64_t processed = pool.processed_count();
+    const uint64_t batches = pool.batch_count();
     std::printf("done — %d packet(s) captured, %llu processed, %llu alert(s), %.3fs, "
-                "%.0f packets/sec\n",
+                "%.0f packets/sec, avg batch %.1f\n",
                 delivered, static_cast<unsigned long long>(processed),
                 static_cast<unsigned long long>(g_alert_count.load()), seconds,
-                seconds > 0 ? processed / seconds : 0.0);
+                seconds > 0 ? processed / seconds : 0.0,
+                batches > 0 ? static_cast<double>(processed) / batches : 0.0);
+    // Port scan and SYN flood counts can shift slightly between runs (alert
+    // debouncing depends on thread timing); entropy and signature counts are
+    // per-packet and must not.
+    using netsentinel::AnomalyType;
+    auto by_type = [](AnomalyType t) {
+        return static_cast<unsigned long long>(g_alerts_by_type[static_cast<size_t>(t)].load());
+    };
+    std::printf("alerts by type: port_scan=%llu syn_flood=%llu high_entropy=%llu signature=%llu\n",
+                by_type(AnomalyType::kPortScan), by_type(AnomalyType::kSynFlood),
+                by_type(AnomalyType::kHighEntropyPayload), by_type(AnomalyType::kSignatureMatch));
     if (engine.backend_fallbacks() > 0) {
         std::printf("warning: %llu batch(es) fell back to CPU entropy after a %s failure\n",
                     static_cast<unsigned long long>(engine.backend_fallbacks()),

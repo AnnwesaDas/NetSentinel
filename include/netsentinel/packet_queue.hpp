@@ -48,7 +48,14 @@ public:
     // an empty batch does not by itself mean the source is done — check
     // is_finished() to distinguish "idle, keep polling" from "shut down and
     // drained".
-    std::vector<QueuedPacket> pop_batch(size_t max_n, std::chrono::milliseconds timeout);
+    //
+    // `linger`: if fewer than `max_n` packets are waiting, wait up to this
+    // long for a full batch before taking what's there. Without it, workers
+    // that are faster than the producer each grab ~1 packet per call, and
+    // batching (and any GPU dispatch per batch) degenerates to per-packet.
+    std::vector<QueuedPacket> pop_batch(size_t max_n, std::chrono::milliseconds timeout,
+                                        std::chrono::microseconds linger =
+                                            std::chrono::microseconds(0));
 
     // Signals that no more packets will be pushed. Wakes any blocked
     // push()/pop_batch() callers. Safe to call once, after the producer
@@ -67,6 +74,9 @@ private:
     std::condition_variable not_empty_;
     std::queue<QueuedPacket> items_;
     size_t capacity_;
+    // Batch size consumers last asked for. push() wakes a consumer only when
+    // the queue becomes non-empty or reaches this size, not on every packet.
+    size_t wanted_ = 1;
     bool shutdown_ = false;
 };
 

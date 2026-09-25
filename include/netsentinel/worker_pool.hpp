@@ -19,9 +19,12 @@ class WorkerPool {
 public:
     using AnalysisFn = std::function<void(const std::vector<QueuedPacket>&)>;
 
+    // `linger` is how long a worker waits for a full batch (see
+    // PacketQueue::pop_batch); it bounds the latency batching adds.
     WorkerPool(size_t num_workers, PacketQueue& queue, AnalysisFn analyze,
                size_t batch_size = 64,
-               std::chrono::milliseconds poll_timeout = std::chrono::milliseconds(100));
+               std::chrono::milliseconds poll_timeout = std::chrono::milliseconds(100),
+               std::chrono::microseconds linger = std::chrono::microseconds(2000));
     ~WorkerPool();
 
     WorkerPool(const WorkerPool&) = delete;
@@ -34,6 +37,9 @@ public:
     void join();
 
     [[nodiscard]] uint64_t processed_count() const { return processed_.load(); }
+    // Batches actually handed to the callback. processed / batches is the
+    // real average batch size, which can be far below the configured max.
+    [[nodiscard]] uint64_t batch_count() const { return batches_.load(); }
 
 private:
     void worker_loop();
@@ -42,9 +48,11 @@ private:
     AnalysisFn analyze_;
     size_t batch_size_;
     std::chrono::milliseconds poll_timeout_;
+    std::chrono::microseconds linger_;
     size_t num_workers_;
     std::vector<std::thread> threads_;
     std::atomic<uint64_t> processed_{0};
+    std::atomic<uint64_t> batches_{0};
 };
 
 }  // namespace netsentinel
